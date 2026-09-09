@@ -5,6 +5,92 @@ top.
 
 ---
 
+## 2026-09-09 — Task planned via `cookvideo-agent plan`: EXAMPLE-UI-COPY-001
+
+- Objective: Update the empty-state copy on the CookVideo saved-recipes screen so it points people toward the Discover tab instead of just saying 'No recipes saved yet.'
+- Risk level: LOW
+- Phase set to PLANNED; approvalStatus set to NOT_REQUIRED (approvalRequirements recorded for
+  later -- the approval workflow itself has not started).
+- Read-only with respect to CookVideo; did not invoke Claude, run `git commit`/`git push`, or
+  touch Supabase, Vercel, Mux, or GitHub.
+
+
+## 2026-09-09 — Milestone 4: Planner → Task creation interface (`plan`)
+
+- Added `src/lib/taskInput.ts`: the task input contract -- the handoff boundary an external
+  planner (e.g. ChatGPT) submits a structured task through. `TaskInput` requires `taskId`,
+  `objective`, `scope`, a non-empty `requestedChanges`, `filesExpectedToChange`,
+  `testsRequired`, a `riskLevel` (reusing the same `RISK_LEVELS` Milestone 2 already
+  defines), and `approvalRequirements`. `validateTaskInput` is a pure function that checks
+  an already-parsed value against this shape and collects *every* problem in one pass (not
+  just the first) so a bad submission gets one complete error report; `readTaskInputFile`
+  wraps it with file/JSON handling, never throwing -- a missing file or malformed JSON comes
+  back as data, same as every other failure mode in this codebase.
+- Added `src/lib/plan.ts`: the task-creation orchestration engine, mirroring the existing
+  `execute`/`execution.ts` split between thin CLI wiring and a testable lib module.
+  `buildTaskStateFromInput` maps validated input onto a fresh `TaskState` -- always starting
+  at phase `PLANNED` with `approvalStatus: NOT_REQUIRED` (the approval workflow itself only
+  begins once a task reaches `APPROVAL_REQUIRED` in a later milestone; `approvalRequirements`
+  is preserved as the planner's *anticipated* future approval needs, not a live request).
+  `REPLACEMENT_BLOCKED_PHASES`/`isSafeToReplace` encode existing-task protection: replacing
+  a task is refused while it is `IMPLEMENTING`, `TESTING`, `REVIEW`, `APPROVAL_REQUIRED`,
+  `APPROVED`, `COMMITTING`, `DEPLOYING`, or `VERIFYING`, and allowed only from `PLANNED` or a
+  genuinely terminal phase (`COMPLETED`/`FAILED`/`BLOCKED`/`CANCELLED`). `runPlan` is the
+  full orchestration -- read/validate input, check for an existing task (refuse without
+  `--replace`), check replacement safety, then and only then write `TASK_STATE.json`,
+  `ACTIVE_TASK.md` (via `formatActiveTaskMarkdown`), and a `BUILD_LOG.md` entry (via
+  `prependBuildLogEntry`, which inserts under the "newest entries at the top" marker rather
+  than appending at end-of-file). Every refusal path returns `state: null` and never calls
+  `saveTaskState` -- `TASK_STATE.json` is written exactly once, at the very end, only after
+  every check has passed.
+- Added `src/commands/plan.ts`: thin CLI wiring (`runPlanCommand`, `formatPlanReport`)
+  between `src/config.ts`/`src/lib/plan.ts` and the CLI, matching `execute.ts`'s pattern.
+- Added CLI command `cookvideo-agent plan --file <path> [--replace]` (`npm run plan -- --file
+  <path>`). Prints every validation error on bad input, or -- for the existing-task and
+  replacement-safety refusals -- the existing task's ID and phase, exactly as required.
+- Extended `TaskState` (`src/lib/taskState.ts`) with two fields planner input needs
+  preserved verbatim: `requestedChanges` and `approvalRequirements`. `EMPTY_TASK_STATE` and
+  `isValidTaskState` were updated to match. `loadTaskState` normalizes pre-Milestone-4
+  `TASK_STATE.json` files (which lack these two fields) by defaulting them to `[]` *before*
+  shape-validating, so every state file written by Milestones 1-3 keeps loading exactly as
+  it did before -- a missing field there is backward compatibility, not corruption; a
+  present-but-wrong-shaped field is still a real, rejected error. `commands/task.ts`'s
+  report now also prints `requestedChanges`/`approvalRequirements` for completeness.
+- Fixed a consistency gap surfaced while demonstrating this milestone: `cookvideo-agent
+  reset` previously only reset `TASK_STATE.json`, never touching `ACTIVE_TASK.md` -- harmless
+  while `ACTIVE_TASK.md` was a hand-maintained document, but now that `plan` writes real
+  task content into it, a `reset` with no matching `ACTIVE_TASK.md` update would leave the
+  two files disagreeing (`TASK_STATE.json` empty, `ACTIVE_TASK.md` still showing the last
+  planned task) -- exactly the invariant `README.md` promises they never do. `reset` now
+  also rewrites `ACTIVE_TASK.md` back to its "no active task" form via the same
+  `formatActiveTaskMarkdown` renderer `plan` uses.
+- Added `examples/implement-ui-copy.json`: a harmless example task (a UI-copy-only change to
+  the saved-recipes empty state) demonstrating the input contract. Used only to exercise
+  `plan` during this milestone's own verification -- never executed, and no CookVideo file
+  was ever touched by it.
+- Added `src/__tests__/taskInput.test.ts` (24 tests) covering: a valid task accepted; each
+  required field's absence rejected (`taskId`, `objective`, `scope`, `requestedChanges`);
+  an invalid `riskLevel` rejected; an invalid `approvalRequirements` (wrong type and
+  non-string items) rejected; malformed JSON and a missing file rejected; existing-task
+  protection (refused without `--replace`, existing task ID surfaced); refusal to replace a
+  task in each blocked phase; successful replacement from each safe/terminal phase; and
+  confirmation that a failed validation never creates or modifies `TASK_STATE.json`.
+- Added an `execute`-parity `plan` npm script to `package.json`.
+- Updated `README.md` (planner/control-plane/implementation-engineer roles, the JSON task
+  contract as the handoff boundary, `plan` creates a `PLANNED` task only, execution remains
+  separately approval-gated) and `ARCHITECTURE.md` (brought up to date through this
+  milestone -- it had been left at its Milestone 1 description).
+- Verified: `npm run typecheck` (clean), `npm run lint` (clean), `npm test` (all new tests
+  passing alongside every Milestone 1-3 test), and live runs of `inspect`/`status`/`task`
+  against the pre-existing (pre-Milestone-4-shape) `TASK_STATE.json` to confirm backward
+  compatibility, followed by `plan` (fresh task), `plan` without `--replace` (correctly
+  refused), `plan --replace` while `IMPLEMENTING` (correctly refused), `plan --replace`
+  once `COMPLETED` (correctly succeeded), then `reset` to restore the control plane to an
+  empty state -- confirmed via `task`/`status` and by inspecting `ACTIVE_TASK.md` directly.
+- Did not commit, push, or touch CookVideo, Supabase, Vercel, Mux, or GitHub. `plan` cannot
+  reach any of them by construction -- it only ever writes `TASK_STATE.json`,
+  `ACTIVE_TASK.md`, and a `BUILD_LOG.md` entry at the configured control-plane paths.
+
 ## 2026-09-09 — Milestone 3: Claude execution adapter
 
 - Added `src/agents/claude.ts`: the Claude adapter -- a command/process boundary, not a

@@ -17,7 +17,8 @@
     "task": "npm run build --silent && node dist/cli.js task",
     "approve": "npm run build --silent && node dist/cli.js approve",
     "reset": "npm run build --silent && node dist/cli.js reset",
-    "execute": "npm run build --silent && node dist/cli.js execute"
+    "execute": "npm run build --silent && node dist/cli.js execute",
+    "plan": "npm run build --silent && node dist/cli.js plan"
   },
   "engines": {
     "node": ">=20"

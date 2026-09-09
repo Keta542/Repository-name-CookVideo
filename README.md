@@ -8,12 +8,27 @@ infrastructure, not part of the CookVideo application — it lives in its own re
 
 CookVideo development is coordinated across three actors:
 
-- **ChatGPT** — planner / orchestrator. Decides what should happen next.
-- **Claude** (Claude Code) — autonomous implementation engineer. Does the actual work in
-  the CookVideo repository: writes code, runs checks, reports results.
+- **ChatGPT** — the planner. Decides what should happen next at a product and task level,
+  and hands that decision to this control plane as a structured JSON task definition (see
+  "Planner → task creation interface" below) — never by talking to Claude, git, or
+  CookVideo directly.
+- **Claude** (Claude Code) — the implementation engineer. Reads a task's implementation
+  brief and, only when explicitly allowed to, does the actual work in the CookVideo
+  repository: writes code, runs checks, reports results.
 - **CookVideo Agent** (this project) — the control plane. Gives both of the above a shared,
-  verifiable view of the CookVideo repository's actual current state, instead of relying on
-  memory or assumption carried between separate sessions.
+  verifiable view of the CookVideo repository's actual current state and the current task's
+  actual state, instead of relying on memory or assumption carried between separate
+  sessions.
+
+The **JSON task contract** (`src/lib/taskInput.ts`) is the handoff boundary between the
+planner and this control plane: ChatGPT never edits `TASK_STATE.json` by hand or talks to
+Claude directly — it submits a task definition, `cookvideo-agent plan` validates and
+records it, and everything downstream (execution, approval, commit) reads from that one
+recorded state. `plan` only ever creates a task in the `PLANNED` phase; it never starts
+work. Actually invoking Claude (`cookvideo-agent execute --execute`) and actually
+committing/pushing (gated behind `cookvideo-agent approve`) are each their own, separately
+approval-gated steps — planning is deliberately the only ungated step in the whole
+pipeline, because it only ever records intent, never acts on it.
 
 Two more pieces the control plane is built around:
 
@@ -67,6 +82,7 @@ npm run task      # Show the current task's lifecycle phase, risk and approval s
 npm run approve   # Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
 npm run reset     # Reset task state to empty (does not delete source or repo files)
 npm run execute   # Prepare (SAFE/DRY-RUN by default) a Claude implementation attempt
+npm run plan -- --file <path> [--replace]   # Submit a planner's JSON task definition
 ```
 
 Equivalently, once built, invoke the local CLI entry point directly:
@@ -78,6 +94,7 @@ node dist/cli.js task
 node dist/cli.js approve
 node dist/cli.js reset
 node dist/cli.js execute [--execute]
+node dist/cli.js plan --file <path> [--replace]
 node dist/cli.js help
 ```
 
@@ -119,7 +136,21 @@ gates" below for why that's deliberate at this stage.
 ### `reset`
 
 Overwrites `.cookvideo/TASK_STATE.json` with a fresh empty state (phase `PLANNED`, no task
-ID). Never deletes source code, repository files, or any other `.cookvideo/` document.
+ID), and rewrites `.cookvideo/ACTIVE_TASK.md` to match (its "no active task" form) — the two
+are always driven by the same renderer, so they can't be left disagreeing with each other.
+Never deletes source code, repository files, or any other `.cookvideo/` document.
+
+### `plan`
+
+Submits a planner's structured JSON task definition and records it as the new `PLANNED`
+task. See "Planner → task creation interface" below for the full input contract and safety
+model — in short: validates the submitted file against a strict schema (rejecting it with
+every problem listed if it doesn't match, and never touching `TASK_STATE.json` on a
+rejection), refuses to overwrite an existing active task unless `--replace` is passed, and
+refuses `--replace` itself while that existing task is mid-flight
+(`IMPLEMENTING`/`TESTING`/`REVIEW`/`APPROVAL_REQUIRED`/`APPROVED`/`COMMITTING`/`DEPLOYING`/`VERIFYING`).
+Never edits CookVideo, invokes Claude, runs `git commit`/`git push`, or touches Supabase,
+Vercel, Mux, GitHub, or any production secret.
 
 ### `execute`
 
@@ -137,10 +168,12 @@ npm run lint        # eslint src
 npm test             # builds, then runs the integration + unit test suite
 ```
 
-`npm test` includes both an integration test against the real, configured CookVideo
-repository (`src/__tests__/inspect.test.ts`, read-only) and unit tests for the task/approval
-engine (`src/__tests__/taskState.test.ts`), which use temporary files and never touch the
-real `.cookvideo/TASK_STATE.json`.
+`npm test` includes an integration test against the real, configured CookVideo repository
+(`src/__tests__/inspect.test.ts`, read-only) alongside unit tests for the task/approval
+engine (`src/__tests__/taskState.test.ts`), the Claude adapter and execution engine
+(`src/__tests__/claude.test.ts`, `src/__tests__/execution.test.ts`), and the task input
+contract and planning engine (`src/__tests__/taskInput.test.ts`) — all of which use
+temporary files and never touch the real `.cookvideo/TASK_STATE.json`.
 
 ## Project state (`.cookvideo/`)
 
@@ -278,9 +311,70 @@ exactly as before, gated by `cookvideo-agent approve` — `execute` does not com
 deploy anything, in either dry-run or local mode. The only thing execution mode controls is
 whether Claude itself may be invoked as a local process.
 
+## Planner → task creation interface
+
+Milestone 4 adds the deterministic handoff boundary an external planner (ChatGPT) uses to
+submit a structured engineering task to this control plane — `src/lib/taskInput.ts` (the
+schema) and `src/lib/plan.ts` (the orchestration behind `cookvideo-agent plan`).
+
+### The JSON task contract
+
+A task input file must be a JSON object with:
+
+| Field | Type | Notes |
+|---|---|---|
+| `taskId` | non-empty string | |
+| `objective` | non-empty string | |
+| `scope` | non-empty string | |
+| `requestedChanges` | non-empty string[] | the planner's own description of the work |
+| `filesExpectedToChange` | string[] | may be empty |
+| `testsRequired` | string[] | may be empty |
+| `riskLevel` | `"LOW" \| "MEDIUM" \| "HIGH"` | |
+| `approvalRequirements` | string[] | what the planner anticipates this task will need approval for later; may be empty |
+
+`validateTaskInput` collects *every* problem with a bad submission in one pass (not just
+the first), so a rejected task input comes back with a complete error report. Nothing about
+validation touches `TASK_STATE.json` — see `examples/implement-ui-copy.json` for a
+harmless, fully worked example.
+
+### What `plan` does
+
+1. Reads and validates the JSON file. On any schema violation, refuses with every error
+   listed and does not modify `TASK_STATE.json`.
+2. If an active task already exists (`TASK_STATE.json` has a `taskId`), refuses unless
+   `--replace` is passed — printing the existing task's ID and phase either way.
+3. Even with `--replace`, refuses while that existing task is in a blocked, mid-flight phase
+   (`IMPLEMENTING`, `TESTING`, `REVIEW`, `APPROVAL_REQUIRED`, `APPROVED`, `COMMITTING`,
+   `DEPLOYING`, `VERIFYING`) — replacement is only allowed from `PLANNED` or a genuinely
+   terminal phase (`COMPLETED`, `FAILED`, `BLOCKED`, `CANCELLED`).
+4. Only once every check passes: writes `TASK_STATE.json` (phase `PLANNED`, approvalStatus
+   `NOT_REQUIRED` — the approval workflow itself hasn't started yet; `approvalRequirements`
+   is preserved as the planner's anticipated future need, not a live request),
+   `ACTIVE_TASK.md` (the human-readable mirror), and a `BUILD_LOG.md` entry.
+
+`plan` cannot edit CookVideo, invoke Claude, run `git commit`/`git push`, or touch Supabase,
+Vercel, Mux, GitHub, or any production secret — by construction, since it only ever writes
+to the three configured control-plane paths above.
+
+### Execution remains separately approval-gated
+
+Creating a `PLANNED` task via `plan` starts nothing. Advancing it through the lifecycle
+(`IMPLEMENTING` → … → `COMPLETED`), actually invoking Claude (`cookvideo-agent execute
+--execute` with `COOKVIDEO_AGENT_EXECUTION_MODE=local`), and actually committing/pushing
+(gated behind `cookvideo-agent approve`, which still only flips state — it does not perform
+the commit/push itself) are each their own, later, separately-gated steps. Planning and
+execution are deliberately kept apart: a planner recording intent should never be
+indistinguishable from an engineer acting on it.
+
 ## Current milestone
 
-**Milestone 3 (this one):** the Claude execution adapter (`src/agents/claude.ts`) and the
+**Milestone 4 (this one):** the planner → task creation interface — `cookvideo-agent plan`.
+A deterministic JSON handoff boundary (`src/lib/taskInput.ts`), existing-task and
+replacement-safety protection, and a `PLANNED`-only task record. No write access to
+CookVideo, no Claude invocation, no git commit/push, no production-system access — `plan`
+cannot reach any of them by construction.
+
+**Milestone 3:** the Claude execution adapter (`src/agents/claude.ts`) and the
 task execution module (`src/lib/execution.ts`) built around it, plus the `execute` CLI
 command. Defaults to SAFE/DRY-RUN; real execution requires an explicit `--execute` flag
 *and* `COOKVIDEO_AGENT_EXECUTION_MODE=local`, both together. No write access to CookVideo —

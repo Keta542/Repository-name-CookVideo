@@ -45,6 +45,12 @@ export const STATE_FILES = [
 // src/lib/taskState.ts -- never edited by hand while the CLI is in use.
 export const TASK_STATE_PATH = path.join(STATE_DIR, "TASK_STATE.json");
 
+// The human-readable mirror of TASK_STATE.json, and the chronological build log --
+// both written by `cookvideo-agent plan` (src/lib/plan.ts) in addition to being
+// maintained by hand between milestones.
+export const ACTIVE_TASK_PATH = path.join(STATE_DIR, "ACTIVE_TASK.md");
+export const BUILD_LOG_PATH = path.join(STATE_DIR, "BUILD_LOG.md");
+
 // ---------------------------------------------------------------------------
 // Milestone 3: Claude execution adapter configuration
 // ---------------------------------------------------------------------------

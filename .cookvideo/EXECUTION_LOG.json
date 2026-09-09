@@ -1,1 +1,40 @@
-[]
+[
+  {
+    "timestamp": "2026-09-09T19:24:00.267Z",
+    "taskId": "EXAMPLE-UI-COPY-001",
+    "phase": "PLANNED",
+    "executionMode": "dry-run",
+    "executeFlagSet": false,
+    "dryRun": true,
+    "command": {
+      "command": "claude",
+      "args": [
+        "C:\\Users\\aesfm\\CookVideoAgent\\.cookvideo\\briefs\\EXAMPLE-UI-COPY-001.md"
+      ],
+      "cwd": "C:\\Users\\aesfm\\CookVideoAgent"
+    },
+    "briefFilePath": "C:\\Users\\aesfm\\CookVideoAgent\\.cookvideo\\briefs\\EXAMPLE-UI-COPY-001.md",
+    "outcome": "DRY-RUN: no command was executed because the --execute flag was not passed and COOKVIDEO_AGENT_EXECUTION_MODE is not \"local\". This is the safe default -- see .cookvideo/EXECUTION_POLICY.md.",
+    "exitCode": null,
+    "spawnError": null
+  },
+  {
+    "timestamp": "2026-09-09T19:26:08.294Z",
+    "taskId": "EXAMPLE-UI-COPY-001",
+    "phase": "PLANNED",
+    "executionMode": "dry-run",
+    "executeFlagSet": true,
+    "dryRun": true,
+    "command": {
+      "command": "claude",
+      "args": [
+        "C:\\Users\\aesfm\\CookVideoAgent\\.cookvideo\\briefs\\EXAMPLE-UI-COPY-001.md"
+      ],
+      "cwd": "C:\\Users\\aesfm\\CookVideoAgent"
+    },
+    "briefFilePath": "C:\\Users\\aesfm\\CookVideoAgent\\.cookvideo\\briefs\\EXAMPLE-UI-COPY-001.md",
+    "outcome": "DRY-RUN: no command was executed because COOKVIDEO_AGENT_EXECUTION_MODE is \"dry-run\", not \"local\". This is the safe default -- see .cookvideo/EXECUTION_POLICY.md.",
+    "exitCode": null,
+    "spawnError": null
+  }
+]

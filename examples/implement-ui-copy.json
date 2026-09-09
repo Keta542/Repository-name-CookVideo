@@ -1,0 +1,18 @@
+{
+  "taskId": "EXAMPLE-UI-COPY-001",
+  "objective": "Update the empty-state copy on the CookVideo saved-recipes screen so it points people toward the Discover tab instead of just saying 'No recipes saved yet.'",
+  "scope": "UI copy only, within the saved-recipes screen component. No changes to data fetching, navigation logic, or any other screen.",
+  "requestedChanges": [
+    "Replace the empty-state message on the saved-recipes screen with copy that mentions the Discover tab",
+    "Keep the existing empty-state illustration/icon as-is",
+    "Keep the copy under two sentences"
+  ],
+  "filesExpectedToChange": [
+    "apps/web/components/SavedRecipesScreen.tsx"
+  ],
+  "testsRequired": [
+    "Existing saved-recipes screen snapshot/unit test updated to match the new copy"
+  ],
+  "riskLevel": "LOW",
+  "approvalRequirements": []
+}

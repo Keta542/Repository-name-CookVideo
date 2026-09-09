@@ -115,6 +115,15 @@ export interface TaskState {
   approvalStatus: ApprovalStatus;
   filesExpectedToChange: string[];
   testsRequired: string[];
+  // Added in Milestone 4, alongside the `plan` command's task input contract
+  // (src/lib/taskInput.ts). Preserved verbatim from whatever the planner
+  // submitted, rather than dropped -- requestedChanges is the planner's own
+  // description of the work; approvalRequirements is what the planner
+  // anticipates this task will need approval for once it reaches
+  // APPROVAL_REQUIRED (informational at PLANNED time -- it does not, by
+  // itself, change approvalStatus; see src/lib/plan.ts).
+  requestedChanges: string[];
+  approvalRequirements: string[];
   result: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -129,6 +138,8 @@ export const EMPTY_TASK_STATE: TaskState = {
   approvalStatus: "NOT_REQUIRED",
   filesExpectedToChange: [],
   testsRequired: [],
+  requestedChanges: [],
+  approvalRequirements: [],
   result: null,
   createdAt: null,
   updatedAt: null,
@@ -162,6 +173,8 @@ export function isValidTaskState(value: unknown): value is TaskState {
     (APPROVAL_STATUSES as readonly string[]).includes(v["approvalStatus"]);
   const filesOk = isStringArray(v["filesExpectedToChange"]);
   const testsOk = isStringArray(v["testsRequired"]);
+  const requestedChangesOk = isStringArray(v["requestedChanges"]);
+  const approvalRequirementsOk = isStringArray(v["approvalRequirements"]);
   const resultOk = v["result"] === null || typeof v["result"] === "string";
   const createdAtOk = v["createdAt"] === null || typeof v["createdAt"] === "string";
   const updatedAtOk = v["updatedAt"] === null || typeof v["updatedAt"] === "string";
@@ -175,6 +188,8 @@ export function isValidTaskState(value: unknown): value is TaskState {
     approvalStatusOk &&
     filesOk &&
     testsOk &&
+    requestedChangesOk &&
+    approvalRequirementsOk &&
     resultOk &&
     createdAtOk &&
     updatedAtOk
@@ -201,13 +216,24 @@ export function loadTaskState(filePath: string): TaskState {
     throw new Error(`Task state file at ${filePath} is not valid JSON: ${reason}`);
   }
 
-  if (!isValidTaskState(parsed)) {
+  // Backward compatibility: TASK_STATE.json files written before Milestone 4
+  // don't have requestedChanges/approvalRequirements. Their absence isn't
+  // corruption -- default them to empty arrays *before* shape-validating, so
+  // every pre-existing state file on disk keeps loading exactly as it did
+  // before this milestone. A field that IS present but wrong-shaped is still
+  // a real error, caught by isValidTaskState right below.
+  const normalized: unknown =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? { requestedChanges: [], approvalRequirements: [], ...(parsed as Record<string, unknown>) }
+      : parsed;
+
+  if (!isValidTaskState(normalized)) {
     throw new Error(
       `Task state file at ${filePath} does not match the expected TaskState shape.`,
     );
   }
 
-  return parsed;
+  return normalized;
 }
 
 export function saveTaskState(filePath: string, state: TaskState): void {

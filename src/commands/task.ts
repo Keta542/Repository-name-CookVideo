@@ -28,12 +28,22 @@ export function formatTaskReport(state: TaskState): string {
   ];
 
   lines.push(
+    `Requested changes: ${
+      state.requestedChanges.length > 0 ? state.requestedChanges.join(", ") : "(none listed)"
+    }`,
+  );
+  lines.push(
     `Files expected to change: ${
       state.filesExpectedToChange.length > 0 ? state.filesExpectedToChange.join(", ") : "(none listed)"
     }`,
   );
   lines.push(
     `Tests required:    ${state.testsRequired.length > 0 ? state.testsRequired.join(", ") : "(none listed)"}`,
+  );
+  lines.push(
+    `Approval requirements: ${
+      state.approvalRequirements.length > 0 ? state.approvalRequirements.join(", ") : "(none listed)"
+    }`,
   );
   lines.push(`Created at:        ${state.createdAt ?? "(unknown)"}`);
   lines.push(`Updated at:        ${state.updatedAt ?? "(unknown)"}`);

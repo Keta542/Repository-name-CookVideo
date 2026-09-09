@@ -5,6 +5,7 @@ import { formatTaskReport, runTask } from "./commands/task.js";
 import { runApprove } from "./commands/approve.js";
 import { runReset } from "./commands/reset.js";
 import { formatExecuteReport, runExecuteCommand } from "./commands/execute.js";
+import { formatPlanReport, runPlanCommand } from "./commands/plan.js";
 
 const USAGE = `cookvideo-agent — CookVideo local control-plane CLI
 
@@ -19,6 +20,14 @@ Usage:
                             a Claude implementation attempt for the current task. Defaults to
                             SAFE/DRY-RUN: prepares and prints everything but invokes nothing.
                             See .cookvideo/EXECUTION_POLICY.md.
+  cookvideo-agent plan --file <path> [--replace]
+                            Submit a structured JSON task definition (from an external
+                            planner such as ChatGPT) and record it as the new PLANNED task.
+                            Refuses to overwrite an existing active task unless --replace is
+                            passed, and refuses --replace itself while that task is
+                            IMPLEMENTING/TESTING/REVIEW/APPROVAL_REQUIRED/APPROVED/
+                            COMMITTING/DEPLOYING/VERIFYING. Never edits CookVideo, invokes
+                            Claude, or runs git commit/push.
   cookvideo-agent help      Show this message
 `;
 
@@ -52,6 +61,22 @@ async function main(argv: string[]): Promise<number> {
       const executeFlag = argv.slice(3).includes("--execute");
       const result = await runExecuteCommand(executeFlag);
       console.log(formatExecuteReport(result));
+      return result.ok ? 0 : 1;
+    }
+    case "plan": {
+      const rest = argv.slice(3);
+      const fileFlagIndex = rest.indexOf("--file");
+      const filePath = fileFlagIndex !== -1 ? rest[fileFlagIndex + 1] : undefined;
+      const replace = rest.includes("--replace");
+
+      if (filePath === undefined || filePath.length === 0 || filePath.startsWith("--")) {
+        console.error("cookvideo-agent plan: --file <path> is required.\n");
+        console.error(USAGE);
+        return 1;
+      }
+
+      const result = runPlanCommand({ filePath, replace });
+      console.log(formatPlanReport(result));
       return result.ok ? 0 : 1;
     }
     case "help":
