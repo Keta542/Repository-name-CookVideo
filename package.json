@@ -1,0 +1,32 @@
+{
+  "name": "cookvideo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local control-plane CLI coordinating ChatGPT (planner), Claude (implementation engineer), and the CookVideo repository. Kept separate from the CookVideo application.",
+  "type": "module",
+  "bin": {
+    "cookvideo-agent": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "npm run build && node --test dist/__tests__/*.test.js",
+    "inspect": "npm run build --silent && node dist/cli.js inspect",
+    "status": "npm run build --silent && node dist/cli.js status",
+    "task": "npm run build --silent && node dist/cli.js task",
+    "approve": "npm run build --silent && node dist/cli.js approve",
+    "reset": "npm run build --silent && node dist/cli.js reset",
+    "execute": "npm run build --silent && node dist/cli.js execute"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1"
+  }
+}

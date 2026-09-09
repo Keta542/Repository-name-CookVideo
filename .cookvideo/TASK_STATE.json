@@ -1,0 +1,13 @@
+{
+  "taskId": null,
+  "objective": null,
+  "scope": null,
+  "phase": "PLANNED",
+  "riskLevel": null,
+  "approvalStatus": "NOT_REQUIRED",
+  "filesExpectedToChange": [],
+  "testsRequired": [],
+  "result": null,
+  "createdAt": null,
+  "updatedAt": null
+}
