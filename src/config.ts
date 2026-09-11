@@ -88,7 +88,19 @@ export const EXECUTION_MODE: ExecutionMode = parseExecutionMode(
 // EXECUTION_MODE is "local" *and* the CLI was invoked with --execute; in dry-run mode this
 // value is only ever displayed, never executed.
 export const CLAUDE_COMMAND_ENV_VAR = "COOKVIDEO_AGENT_CLAUDE_COMMAND";
-const DEFAULT_CLAUDE_COMMAND = "claude";
+
+// On Windows, an npm-installed CLI like Claude Code is a "claude.cmd" shim script, and
+// child_process.spawn (without shell: true, which src/agents/claude.ts deliberately avoids)
+// does not apply PATHEXT/shell resolution the way cmd.exe does -- spawning the bare name
+// "claude" fails with `spawn claude ENOENT` even when claude.cmd is on PATH. Every other
+// platform keeps the existing bare "claude" command. Exposed as its own pure function
+// (rather than inlined) so the platform branch is unit-testable without mocking
+// process.platform or reloading the module.
+export function resolveDefaultClaudeCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "claude.cmd" : "claude";
+}
+
+const DEFAULT_CLAUDE_COMMAND = resolveDefaultClaudeCommand();
 export const CLAUDE_COMMAND: string =
   process.env[CLAUDE_COMMAND_ENV_VAR] && process.env[CLAUDE_COMMAND_ENV_VAR]!.trim().length > 0
     ? process.env[CLAUDE_COMMAND_ENV_VAR]!
