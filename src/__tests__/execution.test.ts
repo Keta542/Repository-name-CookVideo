@@ -11,6 +11,7 @@ import {
   checkApprovalForExecution,
   runExecution,
   validateExecutionTransition,
+  validateExpectedTargets,
   validateTaskExists,
   type ExecuteContext,
   type ExecutionRecord,
@@ -24,6 +25,14 @@ import { harmlessTask } from "./fixtures/harmlessTask.js";
 // (most importantly) spawn a real process against the developer's machine.
 function tempWorkspace(): { taskStatePath: string; executionLogPath: string; briefsDir: string; cwd: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cookvideo-agent-execution-"));
+  // harmlessTask()'s default filesExpectedToChange names this path -- create
+  // it here so every existing test that doesn't care about target
+  // verification (a Milestone 5 addition) keeps exercising a task whose
+  // expected target actually exists in the target repository, exactly as a
+  // real valid task would.
+  const scratchDir = path.join(dir, "test-fixtures", "scratch");
+  fs.mkdirSync(scratchDir, { recursive: true });
+  fs.writeFileSync(path.join(scratchDir, "example.txt"), "existing scratch fixture\n", "utf8");
   return {
     taskStatePath: path.join(dir, "TASK_STATE.json"),
     executionLogPath: path.join(dir, "EXECUTION_LOG.json"),
@@ -168,6 +177,107 @@ test("runExecution refuses a REJECTED task without invoking anything", async () 
 
   assert.equal(result.ok, false);
   assert.match(result.message, /REJECTED/);
+});
+
+// ---------------------------------------------------------------------------
+// target verification (stale/mismatched task targets)
+// ---------------------------------------------------------------------------
+
+test("validateExpectedTargets passes when every expected path exists in the target repo", () => {
+  const ws = tempWorkspace(); // creates test-fixtures/scratch/example.txt under ws.cwd
+  const result = validateExpectedTargets(["test-fixtures/scratch/example.txt"], ws.cwd);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.missingPaths, []);
+});
+
+test("validateExpectedTargets fails when the expected path does not exist in the target repo", () => {
+  const ws = tempWorkspace();
+  const result = validateExpectedTargets(["does/not/exist.tsx"], ws.cwd);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.missingPaths, ["does/not/exist.tsx"]);
+});
+
+test("validateExpectedTargets reports only the missing path(s) out of several", () => {
+  const ws = tempWorkspace();
+  const result = validateExpectedTargets(
+    ["test-fixtures/scratch/example.txt", "does/not/exist.tsx", "also/missing.ts"],
+    ws.cwd,
+  );
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.missingPaths, ["does/not/exist.tsx", "also/missing.ts"]);
+});
+
+test("validateExpectedTargets passes trivially when filesExpectedToChange is empty", () => {
+  const ws = tempWorkspace();
+  const result = validateExpectedTargets([], ws.cwd);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.missingPaths, []);
+});
+
+test("runExecution stops before writing a brief when the expected target is missing, and reports a structured target mismatch", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(
+    ws.taskStatePath,
+    harmlessTask({ filesExpectedToChange: ["apps/web/components/DoesNotExist.tsx"] }),
+  );
+
+  const result = await runExecution(baseContext(ws, { invoke: neverCalledInvoke() }));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.brief, null);
+  assert.equal(result.briefFilePath, null);
+  assert.equal(result.command, null);
+  assert.ok(!fs.existsSync(ws.briefsDir), "no brief should have been written for a target mismatch");
+  assert.ok(result.targetMismatch !== null);
+  assert.deepEqual(result.targetMismatch!.missingPaths, ["apps/web/components/DoesNotExist.tsx"]);
+  assert.equal(result.targetMismatch!.targetPath, ws.cwd);
+  assert.equal(result.targetMismatch!.requiresHumanApproval, true);
+  assert.match(result.message, /TARGET MISMATCH/);
+  assert.match(result.message, /human approval/i);
+});
+
+test("runExecution reports only the missing path(s) when one of several expected targets is missing", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(
+    ws.taskStatePath,
+    harmlessTask({
+      filesExpectedToChange: ["test-fixtures/scratch/example.txt", "apps/web/components/Missing.tsx"],
+    }),
+  );
+
+  const result = await runExecution(baseContext(ws, { invoke: neverCalledInvoke() }));
+
+  assert.equal(result.ok, false);
+  assert.ok(result.targetMismatch !== null);
+  assert.deepEqual(result.targetMismatch!.missingPaths, ["apps/web/components/Missing.tsx"]);
+});
+
+test("runExecution never invokes Claude on a target mismatch, even with executeFlag=true and executionMode=local", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(
+    ws.taskStatePath,
+    harmlessTask({ filesExpectedToChange: ["apps/web/components/DoesNotExist.tsx"] }),
+  );
+
+  const result = await runExecution(
+    baseContext(ws, { executionMode: "local", executeFlag: true, invoke: neverCalledInvoke() }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(result.targetMismatch !== null);
+  assert.equal(result.result, null);
+});
+
+test("runExecution executes normally (past target verification) when the expected target exists", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask());
+
+  const result = await runExecution(baseContext(ws, { invoke: neverCalledInvoke() }));
+
+  assert.equal(result.targetMismatch, null);
+  assert.ok(result.brief !== null);
+  assert.ok(result.briefFilePath !== null);
+  assert.ok(fs.existsSync(result.briefFilePath!));
 });
 
 // ---------------------------------------------------------------------------

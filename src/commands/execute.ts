@@ -1,19 +1,50 @@
 import {
-  AGENT_ROOT,
   BRIEFS_DIR,
   CLAUDE_COMMAND,
+  DEFAULT_EXECUTION_TARGET_NAME,
   EXECUTION_LOG_PATH,
   EXECUTION_MODE,
   TASK_STATE_PATH,
+  listExecutionTargetNames,
+  resolveExecutionTarget,
 } from "../config.js";
 import { runExecution, type RunExecuteResult } from "../lib/execution.js";
+import { loadTaskState } from "../lib/taskState.js";
 
 // Wires real configuration (config.ts) into an ExecuteContext and delegates
-// to the pure orchestration in src/lib/execution.ts. `executeFlag` is passed
-// in from CLI argument parsing (src/cli.ts) rather than read here, so this
-// function stays a thin, testable wiring layer with no argv parsing of its
-// own.
-export async function runExecuteCommand(executeFlag: boolean): Promise<RunExecuteResult> {
+// to the pure orchestration in src/lib/execution.ts. `executeFlag` and
+// `targetName` are passed in from CLI argument parsing (src/cli.ts) rather
+// than read here, so this function stays a thin, testable wiring layer with
+// no argv parsing of its own.
+//
+// `targetName` selects which approved repository (src/config.ts's
+// EXECUTION_TARGETS) Claude's working directory will be. It defaults to
+// this control plane's own repository -- the only target that existed
+// before Milestone 4 -- so an execute invocation that doesn't name a target
+// behaves exactly as it always has. An unrecognized name is refused here,
+// before runExecution (and therefore before any process could be spawned):
+// this control plane will never fall back to an arbitrary or guessed path.
+export async function runExecuteCommand(
+  executeFlag: boolean,
+  targetName: string = DEFAULT_EXECUTION_TARGET_NAME,
+): Promise<RunExecuteResult> {
+  const target = resolveExecutionTarget(targetName);
+  if (target === null) {
+    return {
+      ok: false,
+      dryRun: true,
+      state: loadTaskState(TASK_STATE_PATH),
+      brief: null,
+      briefFilePath: null,
+      command: null,
+      result: null,
+      message:
+        `Unknown execution target "${targetName}". Approved targets: ` +
+        `${listExecutionTargetNames().join(", ")}. See .cookvideo/EXECUTION_POLICY.md.`,
+      targetMismatch: null,
+    };
+  }
+
   return runExecution({
     taskStatePath: TASK_STATE_PATH,
     executionLogPath: EXECUTION_LOG_PATH,
@@ -21,7 +52,7 @@ export async function runExecuteCommand(executeFlag: boolean): Promise<RunExecut
     claudeCommand: CLAUDE_COMMAND,
     executionMode: EXECUTION_MODE,
     executeFlag,
-    cwd: AGENT_ROOT,
+    cwd: target.path,
   });
 }
 
@@ -39,6 +70,21 @@ function formatCommand(result: RunExecuteResult): string {
 // clear, unambiguous statement of whether dry-run mode prevented execution.
 export function formatExecuteReport(result: RunExecuteResult): string {
   const lines: string[] = ["CookVideo Agent -- execute", ""];
+
+  if (result.targetMismatch !== null) {
+    lines.push(result.message);
+    lines.push("");
+    lines.push("Target mismatch:");
+    lines.push(`  Selected target repository: ${result.targetMismatch.targetPath}`);
+    lines.push("  Missing expected path(s):");
+    lines.push(result.targetMismatch.missingPaths.map((p) => `    - ${p}`).join("\n"));
+    lines.push("");
+    lines.push(
+      "Human approval is required before changing the execution target or this task's " +
+        "expected files. No implementation brief was written and Claude was not invoked.",
+    );
+    return lines.join("\n");
+  }
 
   if (result.brief === null) {
     lines.push(result.message);

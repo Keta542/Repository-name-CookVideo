@@ -83,6 +83,46 @@ export function checkApprovalForExecution(state: TaskState): ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Target verification (stale/mismatched task targets)
+// ---------------------------------------------------------------------------
+
+// Resolves one of a task's filesExpectedToChange against the selected target
+// repository's root. Returns null (treated the same as "missing" by
+// validateExpectedTargets) rather than a path outside that root -- this
+// check exists to catch a stale or mismatched task target, not to grant
+// Claude any access it doesn't already have via the approved-targets
+// allowlist in src/config.ts, and it must never itself be tricked by a
+// "../" path into reporting something outside the repository as found.
+function resolveExpectedTargetPath(cwd: string, relativePath: string): string | null {
+  const resolvedRoot = path.resolve(cwd);
+  const resolved = path.resolve(cwd, relativePath);
+  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+    return null;
+  }
+  return resolved;
+}
+
+export interface ExpectedTargetsValidation {
+  ok: boolean;
+  missingPaths: string[];
+}
+
+// A task's filesExpectedToChange is the planner's own record of what should
+// already exist in the selected target repository. If any of them are
+// missing -- a stale task, a target repository picked in error, a typo in
+// the planner's JSON -- this control plane must never let Claude quietly
+// substitute a different file and proceed; see .cookvideo/EXECUTION_POLICY.md.
+// An empty filesExpectedToChange list has nothing to verify and always
+// passes, matching the existing "(none listed)" treatment elsewhere.
+export function validateExpectedTargets(filesExpectedToChange: string[], cwd: string): ExpectedTargetsValidation {
+  const missingPaths = filesExpectedToChange.filter((relativePath) => {
+    const resolved = resolveExpectedTargetPath(cwd, relativePath);
+    return resolved === null || !fs.existsSync(resolved);
+  });
+  return { ok: missingPaths.length === 0, missingPaths };
+}
+
+// ---------------------------------------------------------------------------
 // Implementation brief
 // ---------------------------------------------------------------------------
 
@@ -165,6 +205,18 @@ export interface ExecuteContext {
   invoke?: (command: ClaudeExecutionCommand) => Promise<ClaudeExecutionResult>;
 }
 
+// Produced instead of a normal refusal when the task's filesExpectedToChange
+// don't exist in the selected target repository. Distinct from a plain
+// `message` string so callers (src/commands/execute.ts, and tests) can
+// assert on the missing paths and target repository directly, rather than
+// pattern-matching prose -- and so the "human approval required" statement
+// is a structured fact, not just wording that could drift.
+export interface TargetMismatchInfo {
+  missingPaths: string[];
+  targetPath: string;
+  requiresHumanApproval: true;
+}
+
 export interface RunExecuteResult {
   ok: boolean;
   dryRun: boolean;
@@ -174,6 +226,9 @@ export interface RunExecuteResult {
   command: ClaudeExecutionCommand | null;
   result: ClaudeExecutionResult | null;
   message: string;
+  // null except in the one scenario where filesExpectedToChange failed
+  // target verification -- see validateExpectedTargets.
+  targetMismatch: TargetMismatchInfo | null;
 }
 
 function refusal(state: TaskState, message: string): RunExecuteResult {
@@ -186,6 +241,34 @@ function refusal(state: TaskState, message: string): RunExecuteResult {
     command: null,
     result: null,
     message,
+    targetMismatch: null,
+  };
+}
+
+// Stops the execution flow before the implementation brief is even written
+// or Claude is invoked -- filesExpectedToChange failed target verification,
+// so this control plane must not proceed on its own. Mirrors `refusal()` but
+// also carries the structured TargetMismatchInfo callers need.
+function targetMismatchRefusal(state: TaskState, targetPath: string, missingPaths: string[]): RunExecuteResult {
+  const message =
+    `TARGET MISMATCH: expected file(s) not found in target repository "${targetPath}": ` +
+    `${missingPaths.join(", ")}. Execution stopped before invoking Claude -- human approval ` +
+    "is required before changing the execution target or this task's expected files. " +
+    "See .cookvideo/EXECUTION_POLICY.md.";
+  return {
+    ok: false,
+    dryRun: true,
+    state,
+    brief: null,
+    briefFilePath: null,
+    command: null,
+    result: null,
+    message,
+    targetMismatch: {
+      missingPaths,
+      targetPath,
+      requiresHumanApproval: true,
+    },
   };
 }
 
@@ -216,6 +299,11 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
   const approvalCheck = checkApprovalForExecution(state);
   if (!approvalCheck.ok) {
     return refusal(state, approvalCheck.reason ?? "Approval policy check failed.");
+  }
+
+  const targetsCheck = validateExpectedTargets(state.filesExpectedToChange, ctx.cwd);
+  if (!targetsCheck.ok) {
+    return targetMismatchRefusal(state, ctx.cwd, targetsCheck.missingPaths);
   }
 
   const brief = buildImplementationBrief(state);
@@ -288,5 +376,6 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
     command,
     result,
     message,
+    targetMismatch: null,
   };
 }

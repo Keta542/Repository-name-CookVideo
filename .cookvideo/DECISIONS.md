@@ -36,3 +36,106 @@ structurally isolated from the CookVideo Next.js application.
 - The CookVideo repository path is currently hardcoded (with an env-var override) rather
   than configurable via a config file — acceptable for a single-machine, single-repo
   milestone; would need revisiting for multi-repo or multi-machine use.
+
+---
+
+## 2026-09-11 — Register CookVideo as an approved execution target (Milestone 4)
+
+**Problem:** The Claude execution adapter (Milestone 3) could only ever run against this
+control plane's own repository (`AGENT_ROOT`), hardcoded as the `cwd` in
+`src/commands/execute.ts`. Doing real implementation work in the actual CookVideo repository
+needs a way to point Claude's working directory there — without opening execution up to an
+arbitrary or operator-guessed filesystem path.
+
+**Options considered:**
+1. Accept a raw `--path <path>` (or similar) on `cookvideo-agent execute`, trusting the
+   caller to supply a safe directory.
+2. Introduce a second, separate configuration mechanism (e.g. a JSON targets file) just for
+   this.
+3. Add a small, explicit, closed registry of named targets (`EXECUTION_TARGETS`) inside the
+   configuration module that already exists (`src/config.ts`), each with a name, a fixed
+   path, and a stated purpose; resolve a target only by name, never by path.
+
+**Decision:** Option 3. `src/config.ts` now defines `EXECUTION_TARGETS` with exactly two
+entries — `CookVideoAgent` (this repository, still the default) and `CookVideo`
+(`C:\Users\aesfm\CookVideo`) — plus `resolveExecutionTarget(name)` and
+`listExecutionTargetNames()`. `cookvideo-agent execute` gained an optional `--target <name>`
+flag; omitting it preserves the exact Milestone 3 behavior (cwd = `AGENT_ROOT`). An unknown
+target name is refused in `src/commands/execute.ts` before `runExecution` is ever called —
+no brief is written, no command is built, nothing is spawned.
+
+**Why:**
+- Keeps target selection name-based and closed rather than path-based and open — a typo or a
+  malicious task input can name an unrecognized target (rejected) but can never smuggle in an
+  arbitrary path.
+- Reuses the configuration module and patterns (`src/config.ts`) that already exist for
+  `COOKVIDEO_REPO_PATH`, `CLAUDE_COMMAND`, etc., rather than inventing a second config system.
+- `src/lib/execution.ts`'s pure orchestration is untouched — it still just takes a `cwd`
+  string. Target resolution lives entirely in the thin wiring layer
+  (`src/commands/execute.ts`), so its extensive existing test suite required no changes.
+- Leaves every approval-gated action (`APPROVAL_POLICY.md`: commit, push, production
+  Supabase/Vercel/Mux, destructive operations) completely unaffected — target selection only
+  changes where Claude may read/edit under the existing AUTOMATIC category, never what
+  requires approval.
+
+**Known limitations:**
+- The registry is a fixed, hand-maintained list in source — adding a third target requires a
+  code change and a new decision recorded here, which is intentional for now but would need
+  revisiting if target repositories become numerous or need to be added without a code
+  change.
+- `--target` only selects Claude's working directory; it does not yet do anything to scope
+  which git repository `inspect`/`status` report on, or otherwise change any other command's
+  behavior. Those remain CookVideoAgent-only, as before.
+
+---
+
+## 2026-09-11 — Verify a task's expected targets exist before invoking Claude
+
+**Problem:** Naming a target repository by name (the previous decision) closes off *which*
+repositories execution can point at, but says nothing about whether a given task's own
+`filesExpectedToChange` still makes sense for the currently selected target. A task can go
+stale (the file was renamed or removed since the planner wrote the task), or be run against
+the wrong target repository by operator error -- in either case, nothing previously stopped
+`runExecution` from writing a brief and invoking Claude against a target that doesn't actually
+contain what the task describes, leaving Claude to improvise.
+
+**Options considered:**
+1. Leave it to Claude's own judgment once invoked -- trust the implementation brief and the
+   agent to notice a missing file and stop itself.
+2. Warn but proceed -- log a warning to the execution record and still invoke Claude.
+3. Verify every `filesExpectedToChange` path exists in the selected target's repository
+   before the brief is written or Claude is invoked; on any miss, stop and return a
+   structured target-mismatch result requiring human approval to proceed.
+
+**Decision:** Option 3. Added `validateExpectedTargets` to `src/lib/execution.ts`, run in
+`runExecution` immediately after the existing approval-policy check and before
+`buildImplementationBrief`/writing the brief file. A miss short-circuits into a new
+`targetMismatchRefusal`, which populates `RunExecuteResult.targetMismatch` (`missingPaths`,
+`targetPath`, `requiresHumanApproval: true`) instead of a brief/command. `cookvideo-agent
+execute` (`formatExecuteReport`) renders this distinctly from the normal dry-run/local report.
+
+**Why:**
+- This control plane's entire premise (`ARCHITECTURE.md`) is a shared, verifiable view of
+  ground truth rather than something anyone assumes -- silently letting Claude substitute a
+  different file when the recorded target is missing would violate that premise more directly
+  than almost anything else this control plane does.
+- Placing the check ahead of `buildImplementationBrief` means no misleading brief is ever
+  written to `.cookvideo/briefs/` for a task that cannot safely proceed, and Claude is never
+  spawned -- verified directly in tests via an `invoke` spy that must never be called,
+  regardless of the `--execute`/`EXECUTION_MODE=local` double gate.
+- Reuses the existing `cwd`/target-resolution plumbing (`src/config.ts`'s `EXECUTION_TARGETS`,
+  `src/commands/execute.ts`'s `resolveExecutionTarget`) -- this check only resolves
+  `filesExpectedToChange` against the already-approved `cwd`, and explicitly refuses to
+  resolve a path that escapes that root (e.g. `../../etc/passwd`), so it cannot itself become
+  a way to reach outside the fixed target allowlist.
+- Runs regardless of dry-run vs. local mode, so an operator sees the mismatch while still
+  safely previewing the run, not only after flipping on real execution.
+
+**Known limitations:**
+- Verification is existence-only (`fs.existsSync`) -- it does not check that the file's
+  *content* is still relevant to the task's objective, only that the path is present. A task
+  whose target file exists but has drifted unrelated to the task will still pass.
+- A target-mismatch attempt is not written to `EXECUTION_LOG.json` (matching the existing
+  behavior of the other pre-brief refusals: no active task, invalid lifecycle transition,
+  REJECTED approval). If auditing every mismatch attempt becomes important, this would need
+  revisiting.
