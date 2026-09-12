@@ -115,3 +115,46 @@ export const BRIEFS_DIR = path.join(STATE_DIR, "briefs");
 // separate from TASK_STATE.json so task state stays a snapshot of "where is this task now"
 // rather than a log of every execution attempt against it.
 export const EXECUTION_LOG_PATH = path.join(STATE_DIR, "EXECUTION_LOG.json");
+
+// ---------------------------------------------------------------------------
+// Milestone 4: approved execution targets
+// ---------------------------------------------------------------------------
+
+// The closed set of repositories Claude execution is allowed to use as its working
+// directory. Deliberately a fixed, explicit list rather than a free-form path -- a target is
+// always chosen by name (src/commands/execute.ts resolves it through resolveExecutionTarget)
+// and never accepted as an arbitrary filesystem path from the CLI or environment, so
+// execution can never reach outside these two repositories. Adding a new target is a
+// deliberate config change here, recorded in .cookvideo/DECISIONS.md -- never something a
+// caller can conjure at the command line.
+export interface ExecutionTarget {
+  name: string;
+  path: string;
+  purpose: string;
+}
+
+export const EXECUTION_TARGETS: readonly ExecutionTarget[] = [
+  {
+    name: "CookVideoAgent",
+    path: AGENT_ROOT,
+    purpose: "This control plane's own repository (the default execution target).",
+  },
+  {
+    name: "CookVideo",
+    path: COOKVIDEO_REPO_PATH,
+    purpose: "The actual CookVideo application repository.",
+  },
+];
+
+// Preserves Milestone 3 behavior exactly: an execution request that doesn't name a target
+// still runs against this control plane's own repository, the same cwd (AGENT_ROOT) that was
+// previously the only option.
+export const DEFAULT_EXECUTION_TARGET_NAME = "CookVideoAgent";
+
+export function resolveExecutionTarget(name: string): ExecutionTarget | null {
+  return EXECUTION_TARGETS.find((target) => target.name === name) ?? null;
+}
+
+export function listExecutionTargetNames(): string[] {
+  return EXECUTION_TARGETS.map((target) => target.name);
+}

@@ -15,11 +15,13 @@ Usage:
   cookvideo-agent task      Show the current task's lifecycle phase, risk and approval status
   cookvideo-agent approve   Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
   cookvideo-agent reset     Reset task state to empty (does not delete source or repo files)
-  cookvideo-agent execute [--execute]
+  cookvideo-agent execute [--execute] [--target <name>]
                             Prepare (and, only in local execution mode with --execute, run)
                             a Claude implementation attempt for the current task. Defaults to
                             SAFE/DRY-RUN: prepares and prints everything but invokes nothing.
-                            See .cookvideo/EXECUTION_POLICY.md.
+                            --target selects which approved repository (see
+                            .cookvideo/EXECUTION_POLICY.md) Claude's working directory will
+                            be; defaults to CookVideoAgent (this repository) if omitted.
   cookvideo-agent plan --file <path> [--replace]
                             Submit a structured JSON task definition (from an external
                             planner such as ChatGPT) and record it as the new PLANNED task.
@@ -58,8 +60,11 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "execute": {
-      const executeFlag = argv.slice(3).includes("--execute");
-      const result = await runExecuteCommand(executeFlag);
+      const rest = argv.slice(3);
+      const executeFlag = rest.includes("--execute");
+      const targetFlagIndex = rest.indexOf("--target");
+      const targetName = targetFlagIndex !== -1 ? rest[targetFlagIndex + 1] : undefined;
+      const result = await runExecuteCommand(executeFlag, targetName);
       console.log(formatExecuteReport(result));
       return result.ok ? 0 : 1;
     }
