@@ -79,6 +79,7 @@ first, then runs):
 npm run inspect   # Verify the CookVideo repo + this control plane's own state
 npm run status    # Concise human-readable summary of current engineering state
 npm run task      # Show the current task's lifecycle phase, risk and approval status
+npm run history   # List every task archived to TASK_HISTORY.json by reset/plan --replace
 npm run approve   # Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
 npm run advance -- --to <phase> [--note <text>]   # Record a single real-world lifecycle step
 npm run reset     # Reset task state to empty (does not delete source or repo files)
@@ -92,6 +93,7 @@ Equivalently, once built, invoke the local CLI entry point directly:
 node dist/cli.js inspect
 node dist/cli.js status
 node dist/cli.js task
+node dist/cli.js history
 node dist/cli.js approve
 node dist/cli.js advance --to <phase> [--note <text>]
 node dist/cli.js reset
@@ -135,6 +137,13 @@ task isn't awaiting approval, and no-ops (still exit 0) if the task is already a
 **It never commits, pushes, or deploys anything** — see "Task lifecycle and approval
 gates" below for why that's deliberate at this stage.
 
+### `history`
+
+Read-only. Lists every task ever archived to `.cookvideo/TASK_HISTORY.json` — appended to by
+`reset` and `plan --replace` (see below) whenever a task leaves the active `TASK_STATE.json`
+slot, so its final structured state (phase reached, risk level, approval status, result,
+timestamps) survives being overwritten. Prints "No archived tasks yet" if the log is empty.
+
 ### `advance`
 
 Records a single real-world lifecycle step, one hop at a time: `TESTING`→`REVIEW`,
@@ -153,6 +162,8 @@ instead. See "Task lifecycle and approval gates" below.
 
 ### `reset`
 
+If there is a currently active task, archives its full state to
+`.cookvideo/TASK_HISTORY.json` first (nothing is archived if there is no active task).
 Overwrites `.cookvideo/TASK_STATE.json` with a fresh empty state (phase `PLANNED`, no task
 ID), and rewrites `.cookvideo/ACTIVE_TASK.md` to match (its "no active task" form) — the two
 are always driven by the same renderer, so they can't be left disagreeing with each other.
@@ -167,8 +178,9 @@ every problem listed if it doesn't match, and never touching `TASK_STATE.json` o
 rejection), refuses to overwrite an existing active task unless `--replace` is passed, and
 refuses `--replace` itself while that existing task is mid-flight
 (`IMPLEMENTING`/`TESTING`/`REVIEW`/`APPROVAL_REQUIRED`/`APPROVED`/`COMMITTING`/`DEPLOYING`/`VERIFYING`).
-Never edits CookVideo, invokes Claude, runs `git commit`/`git push`, or touches Supabase,
-Vercel, Mux, GitHub, or any production secret.
+A `--replace` archives the outgoing task to `.cookvideo/TASK_HISTORY.json` first (see
+`history` above), the same as `reset` does. Never edits CookVideo, invokes Claude, runs
+`git commit`/`git push`, or touches Supabase, Vercel, Mux, GitHub, or any production secret.
 
 ### `execute`
 
@@ -190,10 +202,12 @@ npm test             # builds, then runs the integration + unit test suite
 (`src/__tests__/inspect.test.ts`, read-only) alongside unit tests for the task/approval
 engine (`src/__tests__/taskState.test.ts`), the Claude adapter and execution engine
 (`src/__tests__/claude.test.ts`, `src/__tests__/execution.test.ts`), the task input
-contract and planning engine (`src/__tests__/taskInput.test.ts`), and the `approve`/
-`advance`/`complete` commands (`src/__tests__/approve.test.ts`,
-`src/__tests__/advance.test.ts`, `src/__tests__/complete.test.ts`) — all of which use
-temporary files and never touch the real `.cookvideo/TASK_STATE.json`. `npm run verify`
+contract and planning engine (`src/__tests__/taskInput.test.ts`), the `approve`/
+`advance`/`complete`/`reset` commands (`src/__tests__/approve.test.ts`,
+`src/__tests__/advance.test.ts`, `src/__tests__/complete.test.ts`,
+`src/__tests__/reset.test.ts`), and the task history archive
+(`src/__tests__/taskHistory.test.ts`) — all of which use temporary files and never touch the
+real `.cookvideo/TASK_STATE.json`. `npm run verify`
 chains `typecheck` + `lint` + `test` in one command — see "Verification claims" in
 `.cookvideo/ARCHITECTURE.md` for the rule around what a milestone may claim it covers.
 
@@ -213,6 +227,7 @@ it) read and update over time:
 | `EXECUTION_POLICY.md` | What the Claude execution adapter may do in DRY-RUN vs. LOCAL mode |
 | `TASK_STATE.json` | Machine-readable current task state — the source `task`/`approve`/`reset` operate on |
 | `EXECUTION_LOG.json` | Append-only record of every `execute` attempt (dry-run or real), one entry per run |
+| `TASK_HISTORY.json` | Append-only archive of every task that has left the active slot, via `reset` or `plan --replace` |
 
 ## Task lifecycle and approval gates
 
@@ -399,16 +414,25 @@ indistinguishable from an engineer acting on it.
 
 ## Current milestone
 
-**Milestone 10 (this one):** granular, single-hop lifecycle tracking via `cookvideo-agent
+**Milestone 11 (this one):** preserves completed/abandoned task history. Previously, `reset`
+unconditionally overwrote `.cookvideo/TASK_STATE.json` with an empty state, and `plan
+--replace` overwrote it with the new task — both silently discarding the outgoing task's
+full structured record forever, with nothing surviving except whatever `BUILD_LOG.md` prose
+happened to be written along the way. Added `.cookvideo/TASK_HISTORY.json` (append-only,
+mirroring `EXECUTION_LOG.json`'s existing pattern) and a new read-only `cookvideo-agent
+history` command; `reset` and `plan --replace` now both archive the outgoing task there
+before overwriting `TASK_STATE.json`. Purely additive: neither command's existing behavior
+toward `TASK_STATE.json`/`ACTIVE_TASK.md` changed. See `.cookvideo/DECISIONS.md` and
+`.cookvideo/BUILD_LOG.md` for the full rationale and for Milestones 5-9, which this section
+of `README.md` had fallen behind on documenting individually.
+
+**Milestone 10:** granular, single-hop lifecycle tracking via `cookvideo-agent
 advance --to <phase> [--note <text>]` — records `TESTING`→`REVIEW`→`APPROVAL_REQUIRED` and,
 once approved, `APPROVED`→`COMMITTING`→`DEPLOYING`→`VERIFYING` one real-world step at a time,
 each with its own dated `BUILD_LOG.md` entry, instead of only ever seeing `complete` assert
 the whole remaining walk in one call. Purely additive: `completeTask`'s existing single-call
 behavior (Milestones 6-7) is unchanged, and `advance` never edits CookVideo or runs git
-commit/push/deploy. See `.cookvideo/DECISIONS.md` and `.cookvideo/BUILD_LOG.md` for the full
-rationale and for Milestones 5-9 (persisted execute lifecycle transitions, the risk-based
-approval gate, target verification, and the build-integrity fix), which this section of
-`README.md` had fallen behind on documenting individually.
+commit/push/deploy.
 
 **Milestone 4:** the planner → task creation interface — `cookvideo-agent plan`.
 A deterministic JSON handoff boundary (`src/lib/taskInput.ts`), existing-task and

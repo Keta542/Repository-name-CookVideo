@@ -5,6 +5,64 @@ top.
 
 ---
 
+## 2026-09-13 — Milestone 11: preserve completed/abandoned task history (`TASK_HISTORY.json`)
+
+- Closed a gap identical in shape to the one `EXECUTION_LOG.json` already solved for execute
+  attempts: `cookvideo-agent reset` (`src/commands/reset.ts`) unconditionally overwrote
+  `TASK_STATE.json` with an empty state -- including a task that had just reached
+  `COMPLETED` -- and `plan --replace` (`src/lib/plan.ts`) had the identical loss when it
+  overwrote an existing terminal/`PLANNED` task with a new one. Nothing preserved the
+  outgoing task's structured record anywhere except whatever `BUILD_LOG.md` prose happened
+  to be written along the way.
+- Added `src/lib/taskHistory.ts` (`TaskHistoryEntry { archivedAt, archivedVia: "reset" |
+  "plan --replace", task: TaskState }`, `appendTaskHistoryEntry`, `readTaskHistoryEntries`),
+  mirroring `EXECUTION_LOG.json`'s exact existing append-only pattern: missing/corrupt file
+  reads back as `[]`, never throws, never blocks the caller. Added
+  `.cookvideo/TASK_HISTORY.json`, shipped in its initial `[]` form, `TASK_HISTORY_PATH` in
+  `src/config.ts`, and added to `STATE_FILES` so `inspect`/`status` report on it like every
+  other state file.
+- `runReset` (`src/commands/reset.ts`) now takes an injectable `ResetContext`
+  (`taskStatePath`/`activeTaskPath`/`taskHistoryPath`, mirroring `ApproveContext`/
+  `AdvanceContext`) and archives the current task -- if `taskId !== null` -- to
+  `TASK_HISTORY.json` before clearing it; a reset from an already-empty state archives
+  nothing. `runReset`'s result now also reports `archived: boolean`. `runPlan`'s `--replace`
+  path (`src/lib/plan.ts`, new `PlanContext.taskHistoryPath`) archives the outgoing task the
+  same way before overwriting it -- always `PLANNED` or genuinely terminal at that point,
+  since `isSafeToReplace`'s existing blocked-phase check already refused mid-flight phases
+  earlier in the same call. Neither command's existing behavior toward `TASK_STATE.json`/
+  `ACTIVE_TASK.md`/`BUILD_LOG.md` changed -- this is purely an added preservation step before
+  each command's existing overwrite.
+- Added a new read-only `cookvideo-agent history` command (`src/commands/history.ts`:
+  `runHistory`, `formatHistoryReport`), wired into `src/cli.ts` and a `history` npm script
+  (`package.json`), so the archive is actually usable/checkable rather than only ever read by
+  a future automated consumer. Prints "No archived tasks yet" when the log is empty;
+  otherwise lists each archived task's ID, final phase, archive reason, risk level, approval
+  status, result, and archive timestamp, oldest first. Never writes anything.
+- Added `src/__tests__/taskHistory.test.ts` (8 tests: missing/corrupt-file reads,
+  file-and-directory creation on first archive, append ordering across both archive reasons,
+  `formatHistoryReport`'s empty-log message, and `runHistory`/`formatHistoryReport` end to
+  end) and `src/__tests__/reset.test.ts` (4 tests: archiving a `COMPLETED` task, archiving an
+  incomplete/abandoned task just as readily, archiving nothing when there is no active task,
+  and appending across repeated resets rather than overwriting) -- all temp-file-based, never
+  touching the real `.cookvideo/` files. Added 2 tests to `src/__tests__/taskInput.test.ts`
+  covering `runPlan --replace`'s archiving (and the no-existing-task case writing nothing).
+  Full suite: 177/177 passing.
+- Updated `README.md` (`history` documented alongside `task`/`reset`/`plan`; the state-files
+  table gained `TASK_HISTORY.json`; the "Current milestone" section now has a Milestone 11
+  entry), `.cookvideo/ARCHITECTURE.md` (state-files list and "Current milestone" section),
+  and `.cookvideo/DECISIONS.md` (full Problem/Options/Decision/Why/Known-limitations entry).
+- Ran `npm run verify` (`tsc --noEmit` + `eslint` + the full test suite, 177/177 passing) and
+  live-smoke-tested the built CLI's read-only commands (`history`, `status`, `task`) against
+  the real, unaffected `.cookvideo/TASK_STATE.json` (task
+  `MILESTONE-6-SEARCH-EMPTY-STATE-001`, phase `COMPLETED`) -- `history` correctly reports "No
+  archived tasks yet" since neither `reset` nor `plan --replace` has ever run for real yet.
+  Did not run `reset` or `plan --replace` for real against that live state, to avoid
+  archiving/clearing a real completed task as a side effect of verifying this milestone.
+- Did not change `.cookvideo/APPROVAL_POLICY.md`, commit, push, or touch the CookVideo
+  repository, Supabase, Vercel, Mux, or GitHub.
+
+---
+
 ## 2026-09-13 — Milestone 10: granular single-hop lifecycle tracking (`advance`)
 
 - Closed the gap named as a known limitation in both Milestone 7's and Milestone 8's own

@@ -39,6 +39,7 @@ export const STATE_FILES = [
   "EXECUTION_POLICY.md",
   "TASK_STATE.json",
   "EXECUTION_LOG.json",
+  "TASK_HISTORY.json",
 ] as const;
 
 // The machine-readable task/approval state file. Read and written only through
@@ -50,6 +51,12 @@ export const TASK_STATE_PATH = path.join(STATE_DIR, "TASK_STATE.json");
 // maintained by hand between milestones.
 export const ACTIVE_TASK_PATH = path.join(STATE_DIR, "ACTIVE_TASK.md");
 export const BUILD_LOG_PATH = path.join(STATE_DIR, "BUILD_LOG.md");
+
+// Append-only, machine-readable archive of every task that has ever left the
+// active TASK_STATE.json slot (via `reset` or `plan --replace`) -- mirroring
+// EXECUTION_LOG.json's own append-only pattern, for the same reason: a
+// structured record that survives what would otherwise be a silent overwrite.
+export const TASK_HISTORY_PATH = path.join(STATE_DIR, "TASK_HISTORY.json");
 
 // ---------------------------------------------------------------------------
 // Milestone 3: Claude execution adapter configuration

@@ -104,6 +104,8 @@ process actually runs:
 - `TASK_STATE.json` — machine-readable current task state, written only by `plan`, `approve`,
   `reset`, and (for its own bookkeeping) `execute`
 - `EXECUTION_LOG.json` — append-only record of every `execute` attempt (dry-run or real)
+- `TASK_HISTORY.json` — append-only archive of every task that has left the active
+  `TASK_STATE.json` slot, via `reset` or `plan --replace`
 
 ## Task input contract (`src/lib/taskInput.ts`)
 
@@ -139,7 +141,25 @@ directory the milestone was developed in.
 
 ## Current milestone
 
-**Milestone 10 (this one):** granular, single-hop lifecycle tracking. Previously,
+**Milestone 11 (this one):** preserve completed/abandoned task history. Previously, `reset`
+(`src/commands/reset.ts`) unconditionally overwrote `TASK_STATE.json` with an empty state,
+and `plan --replace` (`src/lib/plan.ts`) overwrote it with the new task -- both silently
+discarding the outgoing task's full structured record forever, with nothing surviving except
+whatever `BUILD_LOG.md` prose happened to be written along the way. Added
+`.cookvideo/TASK_HISTORY.json`, append-only, mirroring `EXECUTION_LOG.json`'s exact existing
+read/append pattern (`src/lib/taskHistory.ts`: `TaskHistoryEntry { archivedAt, archivedVia:
+"reset" | "plan --replace", task: TaskState }`). `runReset` now archives the current task (if
+any -- nothing to archive from an already-empty state) before clearing it; `runPlan`'s
+`--replace` path archives the outgoing task the same way before overwriting it (always
+`PLANNED` or genuinely terminal at that point, since `isSafeToReplace` already refused
+mid-flight phases earlier in the same call). Added a new read-only `cookvideo-agent history`
+command. `TASK_HISTORY.json` was added to `STATE_FILES` so `inspect`/`status` report on it
+like every other state file. Neither `reset` nor `plan --replace`'s existing behavior toward
+`TASK_STATE.json`/`ACTIVE_TASK.md`/`BUILD_LOG.md` changed -- this milestone only adds a
+preservation step before each command's existing overwrite. See `.cookvideo/DECISIONS.md` for
+the full rationale.
+
+**Milestone 10:** granular, single-hop lifecycle tracking. Previously,
 `completeTask` was the only way past `TESTING` -- it validates and applies the *entire*
 remaining walk to `COMPLETED` in one call, including `COMMITTING` and `DEPLOYING`, exactly
 the two phases `.cookvideo/APPROVAL_POLICY.md`'s "REQUIRES USER APPROVAL" list is about (git

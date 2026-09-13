@@ -60,6 +60,7 @@ function tempWorkspace(): { ctx: PlanContext; dir: string } {
       taskStatePath: path.join(dir, "TASK_STATE.json"),
       activeTaskPath: path.join(dir, "ACTIVE_TASK.md"),
       buildLogPath: path.join(dir, "BUILD_LOG.md"),
+      taskHistoryPath: path.join(dir, "TASK_HISTORY.json"),
       inputFilePath: path.join(dir, "task.json"),
       replace: false,
     },
@@ -324,6 +325,32 @@ test("runPlan allows --replace when the existing task is in a safe/terminal phas
     const after = loadTaskState(ctx.taskStatePath);
     assert.equal(after.taskId, "NEW-TASK");
   }
+});
+
+test("runPlan --replace archives the outgoing task to TASK_HISTORY.json before overwriting it (Milestone 11)", () => {
+  const { ctx } = tempWorkspace();
+  const before = existingTask({ taskId: "OLD-TASK", phase: "COMPLETED", result: "Completed. CookVideo commit: abc123" });
+  saveTaskState(ctx.taskStatePath, before);
+  fs.writeFileSync(ctx.inputFilePath, JSON.stringify(validInput({ taskId: "NEW-TASK" })), "utf8");
+
+  const result = runPlan({ ...ctx, replace: true });
+  assert.equal(result.ok, true);
+
+  const historyRaw = fs.readFileSync(ctx.taskHistoryPath, "utf8");
+  const history = JSON.parse(historyRaw) as Array<{ archivedVia: string; task: { taskId: string; phase: string } }>;
+  assert.equal(history.length, 1);
+  assert.equal(history[0]?.archivedVia, "plan --replace");
+  assert.equal(history[0]?.task.taskId, "OLD-TASK");
+  assert.equal(history[0]?.task.phase, "COMPLETED");
+});
+
+test("runPlan writes nothing to TASK_HISTORY.json when there is no existing task to replace", () => {
+  const { ctx } = tempWorkspace();
+  fs.writeFileSync(ctx.inputFilePath, JSON.stringify(validInput()), "utf8");
+
+  const result = runPlan({ ...ctx, replace: false });
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(ctx.taskHistoryPath), false);
 });
 
 test("runPlan never needs --replace when there is no existing active task", () => {

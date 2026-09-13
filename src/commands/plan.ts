@@ -1,4 +1,4 @@
-import { ACTIVE_TASK_PATH, BUILD_LOG_PATH, TASK_STATE_PATH } from "../config.js";
+import { ACTIVE_TASK_PATH, BUILD_LOG_PATH, TASK_HISTORY_PATH, TASK_STATE_PATH } from "../config.js";
 import { runPlan, type RunPlanResult } from "../lib/plan.js";
 
 export interface PlanCommandOptions {
@@ -16,6 +16,7 @@ export function runPlanCommand(options: PlanCommandOptions): RunPlanResult {
     taskStatePath: TASK_STATE_PATH,
     activeTaskPath: ACTIVE_TASK_PATH,
     buildLogPath: BUILD_LOG_PATH,
+    taskHistoryPath: TASK_HISTORY_PATH,
     inputFilePath: options.filePath,
     replace: options.replace,
   });

@@ -438,3 +438,62 @@ rather than restricted to `COMMITTING`/`DEPLOYING`.
 - Performing the actual commit/push/deploy action remains entirely out of scope, exactly as
   `.cookvideo/APPROVAL_POLICY.md` already states -- `advance` only ever records that a human
   says a step happened.
+
+---
+
+## 2026-09-13 — Preserve completed/abandoned task history via `TASK_HISTORY.json` (Milestone 11)
+
+**Problem:** `cookvideo-agent reset` (`src/commands/reset.ts`) unconditionally overwrites
+`TASK_STATE.json` with an empty state -- including a task that just reached `COMPLETED`.
+Nothing preserves the outgoing task's structured record anywhere; the only surviving trace is
+scattered prose in `BUILD_LOG.md`, not machine-queryable. `plan --replace`
+(`src/lib/plan.ts`) has the identical loss when it overwrites an existing terminal/`PLANNED`
+task with a new one. This is exactly the class of problem this project already recognized and
+solved once before -- `EXECUTION_LOG.json` exists precisely so "task state stays a
+snapshot... rather than a log of every execution attempt against it" (`src/config.ts`). No
+equivalent existed for the task lifecycle itself: a future planner (ChatGPT), or a human
+auditing "what has this control plane actually completed," had no structured way to ask that
+question -- only whichever `BUILD_LOG.md` prose happened to get written along the way.
+
+**Options considered:**
+1. Leave it as-is -- `BUILD_LOG.md` prose is the only historical record; anyone who needs
+   structured data greps or parses markdown.
+2. Change `reset`/`plan --replace` to refuse when the outgoing task hasn't been "exported"
+   somewhere first, forcing a human to explicitly save it.
+3. Add an append-only `.cookvideo/TASK_HISTORY.json`, mirroring `EXECUTION_LOG.json`'s
+   existing pattern exactly, and have `reset` and `plan --replace` archive the outgoing task
+   into it automatically, with no new required step for the human.
+
+**Decision:** Option 3. Added `src/lib/taskHistory.ts` (`TaskHistoryEntry`,
+`appendTaskHistoryEntry`, `readTaskHistoryEntries`) and `.cookvideo/TASK_HISTORY.json`
+(shipped in its initial `[]` form, `TASK_HISTORY_PATH` in `src/config.ts`, added to
+`STATE_FILES`). `runReset` archives the current task (if `taskId !== null`) before clearing
+it; `runPlan`'s `--replace` path archives the outgoing task before overwriting it. Added a
+new read-only `cookvideo-agent history` command to make the archive actually usable/checkable
+rather than only ever read by a future automated consumer.
+
+**Why:**
+- Option 1 leaves the actual gap in place -- prose isn't queryable, and this control plane's
+  own stated premise is a shared, *verifiable* view of ground truth, not something inferred
+  from reading changelog-style text.
+- Option 2 (refuse until exported) would add friction to `reset`/`plan --replace` for no real
+  safety benefit here -- unlike commit/push/deploy, archiving carries no risk that needs a
+  human's explicit go-ahead; doing it automatically, silently, and losslessly is strictly
+  better than making it another manual step someone can forget.
+- Mirroring `EXECUTION_LOG.json`'s exact read/append shape (missing/corrupt file -> `[]`,
+  never throws, never blocks the caller) reuses an already-proven pattern rather than
+  inventing a second one.
+- `reset`'s and `plan --replace`'s own existing behavior toward `TASK_STATE.json`/
+  `ACTIVE_TASK.md`/`BUILD_LOG.md` is completely unchanged -- this milestone only adds a
+  preservation step immediately before each command's existing overwrite.
+
+**Known limitations:**
+- No pruning, rotation, or size limit on `TASK_HISTORY.json` -- acceptable at this control
+  plane's current, human-driven task volume; would need revisiting if that changes.
+- `history` has no filter, search, or pagination flags -- it prints everything. Fine at
+  current volume; a reasonable fast-follow once the log is large enough to matter.
+- This does not address the other named-and-deferred gap: `.cookvideo/APPROVAL_POLICY.md`
+  still describes performing the actual `COMMITTING`/`DEPLOYING` action (real `git
+  commit`/`git push` against CookVideo) as "future work, not yet built" -- deliberately not
+  folded into this milestone; see the Milestone 11 proposal discussion for why that's a
+  separate, materially higher-risk decision.

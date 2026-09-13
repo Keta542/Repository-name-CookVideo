@@ -2,6 +2,7 @@
 import { formatInspectReport, runInspect } from "./commands/inspect.js";
 import { formatStatusReport, runStatus } from "./commands/status.js";
 import { formatTaskReport, runTask } from "./commands/task.js";
+import { formatHistoryReport, runHistory } from "./commands/history.js";
 import { runApprove } from "./commands/approve.js";
 import { parseCompleteCliArgs, runComplete } from "./commands/complete.js";
 import { ADVANCE_TARGET_PHASES_HELP, parseAdvanceCliArgs, runAdvance } from "./commands/advance.js";
@@ -15,6 +16,8 @@ Usage:
   cookvideo-agent inspect   Verify the CookVideo repository and this control plane's state
   cookvideo-agent status    Print a concise summary of the current engineering state
   cookvideo-agent task      Show the current task's lifecycle phase, risk and approval status
+  cookvideo-agent history   List every task archived to .cookvideo/TASK_HISTORY.json by
+                            reset or plan --replace (read-only)
   cookvideo-agent approve   Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
   cookvideo-agent advance --to <${ADVANCE_TARGET_PHASES_HELP}> [--note <text>]
                             Record a single real-world lifecycle step: TESTING->REVIEW,
@@ -31,7 +34,9 @@ Usage:
                             PENDING/REJECTED). Optionally records the CookVideo commit hash the
                             implementation was committed as. Never edits CookVideo, invokes
                             Claude, or runs git commit/push/deploy.
-  cookvideo-agent reset     Reset task state to empty (does not delete source or repo files)
+  cookvideo-agent reset     Archive the current task (if any) to .cookvideo/TASK_HISTORY.json,
+                            then reset task state to empty (does not delete source or repo
+                            files)
   cookvideo-agent execute [--execute] [--target <name>]
                             Prepare (and, only in local execution mode with --execute, run)
                             a Claude implementation attempt for the current task. Defaults to
@@ -45,8 +50,9 @@ Usage:
                             Refuses to overwrite an existing active task unless --replace is
                             passed, and refuses --replace itself while that task is
                             IMPLEMENTING/TESTING/REVIEW/APPROVAL_REQUIRED/APPROVED/
-                            COMMITTING/DEPLOYING/VERIFYING. Never edits CookVideo, invokes
-                            Claude, or runs git commit/push.
+                            COMMITTING/DEPLOYING/VERIFYING. A --replace archives the
+                            outgoing task to .cookvideo/TASK_HISTORY.json first. Never edits
+                            CookVideo, invokes Claude, or runs git commit/push.
   cookvideo-agent help      Show this message
 `;
 
@@ -64,6 +70,10 @@ async function main(argv: string[]): Promise<number> {
     }
     case "task": {
       console.log(formatTaskReport(runTask()));
+      return 0;
+    }
+    case "history": {
+      console.log(formatHistoryReport(runHistory()));
       return 0;
     }
     case "approve": {

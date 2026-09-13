@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { readTaskInputFile } from "./taskInput.js";
+import { appendTaskHistoryEntry } from "./taskHistory.js";
 import { loadTaskState, saveTaskState, type TaskPhase, type TaskState } from "./taskState.js";
 
 // ---------------------------------------------------------------------------
@@ -192,6 +193,9 @@ export interface PlanContext {
   taskStatePath: string;
   activeTaskPath: string;
   buildLogPath: string;
+  // Milestone 11: where the outgoing task is archived when --replace
+  // overwrites it -- see the archiving step in runPlan below.
+  taskHistoryPath: string;
   inputFilePath: string;
   replace: boolean;
 }
@@ -264,6 +268,17 @@ export function runPlan(ctx: PlanContext): RunPlanResult {
   }
 
   const newState = buildTaskStateFromInput(inputResult.value);
+
+  // Milestone 11: --replace is about to overwrite the existing task's
+  // TASK_STATE.json content wholesale -- archive its full final state first,
+  // so it isn't silently lost the same way `reset` used to discard it.
+  // isSafeToReplace already guarantees `existing` is PLANNED or genuinely
+  // terminal at this point (the blocked-phase check above already returned
+  // if not), never a mid-flight snapshot.
+  if (hasExistingTask) {
+    appendTaskHistoryEntry(ctx.taskHistoryPath, existing, "plan --replace");
+  }
+
   saveTaskState(ctx.taskStatePath, newState);
   fs.writeFileSync(ctx.activeTaskPath, formatActiveTaskMarkdown(newState), "utf8");
 

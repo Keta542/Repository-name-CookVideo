@@ -15,6 +15,7 @@
     "inspect": "npm run build --silent && node dist/cli.js inspect",
     "status": "npm run build --silent && node dist/cli.js status",
     "task": "npm run build --silent && node dist/cli.js task",
+    "history": "npm run build --silent && node dist/cli.js history",
     "approve": "npm run build --silent && node dist/cli.js approve",
     "advance": "npm run build --silent && node dist/cli.js advance",
     "reset": "npm run build --silent && node dist/cli.js reset",
