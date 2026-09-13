@@ -1,5 +1,7 @@
 import {
+  ACTIVE_TASK_PATH,
   BRIEFS_DIR,
+  BUILD_LOG_PATH,
   CLAUDE_COMMAND,
   DEFAULT_EXECUTION_TARGET_NAME,
   EXECUTION_LOG_PATH,
@@ -42,11 +44,14 @@ export async function runExecuteCommand(
         `Unknown execution target "${targetName}". Approved targets: ` +
         `${listExecutionTargetNames().join(", ")}. See .cookvideo/EXECUTION_POLICY.md.`,
       targetMismatch: null,
+      filesChanged: null,
     };
   }
 
   return runExecution({
     taskStatePath: TASK_STATE_PATH,
+    activeTaskPath: ACTIVE_TASK_PATH,
+    buildLogPath: BUILD_LOG_PATH,
     executionLogPath: EXECUTION_LOG_PATH,
     briefsDir: BRIEFS_DIR,
     claudeCommand: CLAUDE_COMMAND,
@@ -61,7 +66,14 @@ function formatCommand(result: RunExecuteResult): string {
     return "(no command constructed)";
   }
   const argsRendered = result.command.args.map((a) => JSON.stringify(a)).join(" ");
-  return `${result.command.command} ${argsRendered}\n  (cwd: ${result.command.cwd})`;
+  // The implementation brief's contents are piped over stdin, not passed as an argv
+  // value (see ClaudeExecutionCommand.input) -- reported by length/source here rather
+  // than dumped in full, since the brief file on disk already carries the full text.
+  return (
+    `${result.command.command} ${argsRendered}\n` +
+    `  (cwd: ${result.command.cwd})\n` +
+    `  (stdin: implementation brief contents, ${result.command.input.length} chars -- see ${result.briefFilePath})`
+  );
 }
 
 // The CLI-facing report for `cookvideo-agent execute`. Prints, in order:
@@ -133,6 +145,11 @@ export function formatExecuteReport(result: RunExecuteResult): string {
       lines.push(`  spawn error: ${result.result.spawnError}`);
     }
     lines.push(`  stdout (${result.result.stdout.length} chars), stderr (${result.result.stderr.length} chars) captured.`);
+    if (result.filesChanged !== null) {
+      lines.push(
+        `  expected files changed: ${result.filesChanged.length > 0 ? result.filesChanged.join(", ") : "(none)"}`,
+      );
+    }
   }
 
   return lines.join("\n");

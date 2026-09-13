@@ -16,14 +16,21 @@ import {
   type ExecuteContext,
   type ExecutionRecord,
 } from "../lib/execution.js";
-import { EMPTY_TASK_STATE, saveTaskState } from "../lib/taskState.js";
+import { EMPTY_TASK_STATE, loadTaskState, saveTaskState } from "../lib/taskState.js";
 import { harmlessTask } from "./fixtures/harmlessTask.js";
 
 // All tests here use a fresh temp directory per test -- never the real
 // .cookvideo/ directory or the real CookVideo repository -- so running the
 // suite can never touch real task state, write a real execution log, or
 // (most importantly) spawn a real process against the developer's machine.
-function tempWorkspace(): { taskStatePath: string; executionLogPath: string; briefsDir: string; cwd: string } {
+function tempWorkspace(): {
+  taskStatePath: string;
+  activeTaskPath: string;
+  buildLogPath: string;
+  executionLogPath: string;
+  briefsDir: string;
+  cwd: string;
+} {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cookvideo-agent-execution-"));
   // harmlessTask()'s default filesExpectedToChange names this path -- create
   // it here so every existing test that doesn't care about target
@@ -35,6 +42,8 @@ function tempWorkspace(): { taskStatePath: string; executionLogPath: string; bri
   fs.writeFileSync(path.join(scratchDir, "example.txt"), "existing scratch fixture\n", "utf8");
   return {
     taskStatePath: path.join(dir, "TASK_STATE.json"),
+    activeTaskPath: path.join(dir, "ACTIVE_TASK.md"),
+    buildLogPath: path.join(dir, "BUILD_LOG.md"),
     executionLogPath: path.join(dir, "EXECUTION_LOG.json"),
     briefsDir: path.join(dir, "briefs"),
     cwd: dir,
@@ -64,6 +73,8 @@ function spyInvoke(result: ClaudeExecutionResult): {
 function baseContext(ws: ReturnType<typeof tempWorkspace>, overrides: Partial<ExecuteContext> = {}): ExecuteContext {
   return {
     taskStatePath: ws.taskStatePath,
+    activeTaskPath: ws.activeTaskPath,
+    buildLogPath: ws.buildLogPath,
     executionLogPath: ws.executionLogPath,
     briefsDir: ws.briefsDir,
     claudeCommand: "claude",
@@ -360,7 +371,17 @@ test("runExecution constructs the exact command that would be (or is) invoked", 
   assert.ok(result.command !== null);
   assert.equal(result.command!.command, "my-claude-cli");
   assert.equal(result.command!.cwd, ws.cwd);
-  assert.deepEqual(result.command!.args, [result.briefFilePath]);
+  // The command must carry the brief's actual rendered contents (its real
+  // objective/scope, not a placeholder) via stdin (input) alongside the
+  // -p/--print flag and --permission-mode acceptEdits -- not a bare path to
+  // the brief file. The brief file itself is still written to disk (asserted
+  // below) purely for auditability.
+  assert.deepEqual(result.command!.args, ["-p", "--permission-mode", "acceptEdits"]);
+  assert.match(result.command!.input, /Add a code comment to a scratch fixture file/);
+  assert.ok(
+    result.briefFilePath !== null && fs.existsSync(result.briefFilePath),
+    "the brief file must still be preserved on disk for auditability",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -370,9 +391,80 @@ test("runExecution constructs the exact command that would be (or is) invoked", 
 test("runExecution invokes the process exactly once when executeFlag=true and executionMode=local", async () => {
   const ws = tempWorkspace();
   saveTaskState(ws.taskStatePath, harmlessTask());
+  const expectedFile = path.join(ws.cwd, "test-fixtures", "scratch", "example.txt");
 
   const successResult: ClaudeExecutionResult = {
-    command: { command: "claude", args: [], cwd: ws.cwd },
+    command: { command: "claude", args: [], cwd: ws.cwd, input: "" },
+    exitCode: 0,
+    stdout: "done",
+    stderr: "",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+    spawnError: null,
+  };
+  const calls: ClaudeExecutionCommand[] = [];
+  const invoke = async (command: ClaudeExecutionCommand): Promise<ClaudeExecutionResult> => {
+    calls.push(command);
+    // Simulates Claude actually doing the requested work -- without this,
+    // the new post-execution verification would (correctly) treat this as
+    // a failed implementation attempt. See the dedicated "no expected file
+    // change" test below for that scenario.
+    fs.writeFileSync(expectedFile, "changed by claude\n", "utf8");
+    return successResult;
+  };
+
+  const result = await runExecution(
+    baseContext(ws, { executionMode: "local", executeFlag: true, invoke }),
+  );
+
+  assert.equal(result.dryRun, false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], result.command);
+  assert.equal(result.ok, true);
+  assert.equal(result.result, successResult);
+  assert.deepEqual(result.filesChanged, ["test-fixtures/scratch/example.txt"]);
+});
+
+// ---------------------------------------------------------------------------
+// post-execution verification -- exit code 0 alone must never be treated as
+// proof of implementation success (Milestone 6 execution-path fix)
+// ---------------------------------------------------------------------------
+
+test("runExecution reports failure when Claude exits 0 but none of the expected files actually changed", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask());
+
+  const successResult: ClaudeExecutionResult = {
+    command: { command: "claude", args: [], cwd: ws.cwd, input: "" },
+    exitCode: 0,
+    stdout: "done",
+    stderr: "",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+    spawnError: null,
+  };
+  // Deliberately does not touch the filesystem -- this reproduces the exact
+  // bug being fixed: Claude ran, exited 0, and changed nothing.
+  const spy = spyInvoke(successResult);
+
+  const result = await runExecution(
+    baseContext(ws, { executionMode: "local", executeFlag: true, invoke: spy.invoke }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.dryRun, false);
+  assert.equal(result.result, successResult);
+  assert.deepEqual(result.filesChanged, []);
+  assert.match(result.message, /exited with code 0/);
+  assert.match(result.message, /without producing the expected/i);
+});
+
+test("runExecution treats exit code 0 as success (with nothing to verify) when the task has no filesExpectedToChange", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ filesExpectedToChange: [] }));
+
+  const successResult: ClaudeExecutionResult = {
+    command: { command: "claude", args: [], cwd: ws.cwd, input: "" },
     exitCode: 0,
     stdout: "done",
     stderr: "",
@@ -386,11 +478,8 @@ test("runExecution invokes the process exactly once when executeFlag=true and ex
     baseContext(ws, { executionMode: "local", executeFlag: true, invoke: spy.invoke }),
   );
 
-  assert.equal(result.dryRun, false);
-  assert.equal(spy.calls.length, 1);
-  assert.deepEqual(spy.calls[0], result.command);
   assert.equal(result.ok, true);
-  assert.equal(result.result, successResult);
+  assert.equal(result.filesChanged, null);
 });
 
 // ---------------------------------------------------------------------------
@@ -402,7 +491,7 @@ test("runExecution surfaces a spawn error without throwing", async () => {
   saveTaskState(ws.taskStatePath, harmlessTask());
 
   const failure: ClaudeExecutionResult = {
-    command: { command: "claude", args: [], cwd: ws.cwd },
+    command: { command: "claude", args: [], cwd: ws.cwd, input: "" },
     exitCode: null,
     stdout: "",
     stderr: "",
@@ -425,7 +514,7 @@ test("runExecution surfaces a non-zero exit code without throwing", async () => 
   saveTaskState(ws.taskStatePath, harmlessTask());
 
   const failure: ClaudeExecutionResult = {
-    command: { command: "claude", args: [], cwd: ws.cwd },
+    command: { command: "claude", args: [], cwd: ws.cwd, input: "" },
     exitCode: 1,
     stdout: "",
     stderr: "boom",
@@ -441,6 +530,158 @@ test("runExecution surfaces a non-zero exit code without throwing", async () => 
 
   assert.equal(result.ok, false);
   assert.match(result.message, /exited with code 1/);
+});
+
+// ---------------------------------------------------------------------------
+// persisted lifecycle transitions (Milestone 8)
+// ---------------------------------------------------------------------------
+
+function successResultAt(cwd: string): ClaudeExecutionResult {
+  return {
+    command: { command: "claude", args: [], cwd, input: "" },
+    exitCode: 0,
+    stdout: "done",
+    stderr: "",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+    spawnError: null,
+  };
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+test("runExecution never writes TASK_STATE.json, ACTIVE_TASK.md, or BUILD_LOG.md in dry-run mode", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ phase: "PLANNED" }));
+
+  await runExecution(baseContext(ws, { invoke: neverCalledInvoke() }));
+
+  assert.equal(loadTaskState(ws.taskStatePath).phase, "PLANNED");
+  assert.ok(!fs.existsSync(ws.activeTaskPath), "ACTIVE_TASK.md should not be written in dry-run");
+  assert.ok(!fs.existsSync(ws.buildLogPath), "BUILD_LOG.md should not be written in dry-run");
+});
+
+test("runExecution persists PLANNED -> IMPLEMENTING before invoking, then IMPLEMENTING -> TESTING on verified success", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ phase: "PLANNED" }));
+  const expectedFile = path.join(ws.cwd, "test-fixtures", "scratch", "example.txt");
+
+  const invoke = async (): Promise<ClaudeExecutionResult> => {
+    // Mid-invocation, TASK_STATE.json must already show IMPLEMENTING -- this
+    // is exactly the crash-safety property the pre-invoke persist exists
+    // for: a real Claude call can take a long time, and a process that dies
+    // partway through must not leave the task looking like it never started.
+    assert.equal(loadTaskState(ws.taskStatePath).phase, "IMPLEMENTING");
+    fs.writeFileSync(expectedFile, "changed by claude\n", "utf8");
+    return successResultAt(ws.cwd);
+  };
+
+  const result = await runExecution(baseContext(ws, { executionMode: "local", executeFlag: true, invoke }));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "TESTING");
+  assert.equal(loadTaskState(ws.taskStatePath).phase, "TESTING");
+  assert.equal(loadTaskState(ws.taskStatePath).result, result.message);
+
+  const activeTask = fs.readFileSync(ws.activeTaskPath, "utf8");
+  assert.match(activeTask, /\| Phase \| TESTING \|/);
+
+  const buildLog = fs.readFileSync(ws.buildLogPath, "utf8");
+  assert.match(buildLog, /Task execution started via `cookvideo-agent execute`/);
+  assert.match(buildLog, /Task execution outcome via `cookvideo-agent execute`/);
+});
+
+test("runExecution persists IMPLEMENTING -> FAILED on a spawn error", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ phase: "PLANNED" }));
+  const failure: ClaudeExecutionResult = {
+    command: { command: "claude", args: [], cwd: ws.cwd, input: "" },
+    exitCode: null,
+    stdout: "",
+    stderr: "",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+    spawnError: "spawn claude ENOENT",
+  };
+
+  const result = await runExecution(
+    baseContext(ws, { executionMode: "local", executeFlag: true, invoke: spyInvoke(failure).invoke }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.state.phase, "FAILED");
+  assert.equal(loadTaskState(ws.taskStatePath).phase, "FAILED");
+  assert.match(loadTaskState(ws.taskStatePath).result ?? "", /ENOENT/);
+});
+
+test("runExecution persists IMPLEMENTING -> FAILED when Claude exits 0 but nothing actually changed", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ phase: "PLANNED" }));
+
+  const result = await runExecution(
+    baseContext(ws, {
+      executionMode: "local",
+      executeFlag: true,
+      invoke: spyInvoke(successResultAt(ws.cwd)).invoke,
+    }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.state.phase, "FAILED");
+  assert.equal(loadTaskState(ws.taskStatePath).phase, "FAILED");
+});
+
+test("runExecution recovers a FAILED task back through IMPLEMENTING to TESTING on a subsequent successful run", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ phase: "FAILED", result: "previous attempt failed" }));
+  const expectedFile = path.join(ws.cwd, "test-fixtures", "scratch", "example.txt");
+
+  const invoke = async (): Promise<ClaudeExecutionResult> => {
+    fs.writeFileSync(expectedFile, "changed by claude\n", "utf8");
+    return successResultAt(ws.cwd);
+  };
+
+  const result = await runExecution(baseContext(ws, { executionMode: "local", executeFlag: true, invoke }));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "TESTING");
+  assert.equal(loadTaskState(ws.taskStatePath).phase, "TESTING");
+});
+
+test("runExecution does not write a duplicate 'started' entry when the task is already IMPLEMENTING", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(ws.taskStatePath, harmlessTask({ phase: "IMPLEMENTING" }));
+  const expectedFile = path.join(ws.cwd, "test-fixtures", "scratch", "example.txt");
+
+  const invoke = async (): Promise<ClaudeExecutionResult> => {
+    fs.writeFileSync(expectedFile, "changed by claude\n", "utf8");
+    return successResultAt(ws.cwd);
+  };
+
+  const result = await runExecution(baseContext(ws, { executionMode: "local", executeFlag: true, invoke }));
+
+  assert.equal(result.ok, true);
+  const buildLog = fs.readFileSync(ws.buildLogPath, "utf8");
+  assert.equal(countOccurrences(buildLog, "Task execution started via"), 0);
+  assert.equal(countOccurrences(buildLog, "Task execution outcome via"), 1);
+});
+
+test("runExecution never persists a phase change when execution is refused before Claude would be invoked (e.g. target mismatch)", async () => {
+  const ws = tempWorkspace();
+  saveTaskState(
+    ws.taskStatePath,
+    harmlessTask({ phase: "PLANNED", filesExpectedToChange: ["apps/web/components/DoesNotExist.tsx"] }),
+  );
+
+  await runExecution(
+    baseContext(ws, { executionMode: "local", executeFlag: true, invoke: neverCalledInvoke() }),
+  );
+
+  assert.equal(loadTaskState(ws.taskStatePath).phase, "PLANNED");
+  assert.ok(!fs.existsSync(ws.activeTaskPath));
+  assert.ok(!fs.existsSync(ws.buildLogPath));
 });
 
 // ---------------------------------------------------------------------------
@@ -463,6 +704,7 @@ test("appendExecutionRecord creates the log file on first use and appends on sub
     outcome: `attempt ${n}`,
     exitCode: null,
     spawnError: null,
+    filesChanged: null,
   });
 
   appendExecutionRecord(logPath, record(1));

@@ -5,7 +5,9 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   EMPTY_TASK_STATE,
+  applyExecutionOutcome,
   approveTask,
+  beginImplementing,
   completeTask,
   isValidTaskState,
   isValidTransition,
@@ -465,4 +467,62 @@ test("saveTaskState followed by loadTaskState of a reset state yields an empty t
 
   const loaded = loadTaskState(filePath);
   assert.deepEqual(loaded, EMPTY_TASK_STATE);
+});
+
+// ---------------------------------------------------------------------------
+// beginImplementing / applyExecutionOutcome (Milestone 8)
+// ---------------------------------------------------------------------------
+
+test("beginImplementing moves PLANNED to IMPLEMENTING", () => {
+  const result = beginImplementing(activeTask({ phase: "PLANNED" }));
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "IMPLEMENTING");
+});
+
+test("beginImplementing is a no-op (same reference) when already IMPLEMENTING", () => {
+  const task = activeTask({ phase: "IMPLEMENTING" });
+  const result = beginImplementing(task);
+  assert.equal(result.ok, true);
+  assert.equal(result.state, task);
+});
+
+test("beginImplementing recovers FAILED and BLOCKED into IMPLEMENTING", () => {
+  for (const phase of ["FAILED", "BLOCKED"] as const) {
+    const result = beginImplementing(activeTask({ phase }));
+    assert.equal(result.ok, true, phase);
+    assert.equal(result.state.phase, "IMPLEMENTING", phase);
+  }
+});
+
+test("beginImplementing refuses a phase that cannot move to IMPLEMENTING (e.g. REVIEW)", () => {
+  const task = activeTask({ phase: "REVIEW" });
+  const result = beginImplementing(task);
+  assert.equal(result.ok, false);
+  assert.equal(result.state, task);
+  assert.match(result.message, /cannot move to IMPLEMENTING/);
+});
+
+test("applyExecutionOutcome moves IMPLEMENTING to TESTING on success and records the result message", () => {
+  const task = activeTask({ phase: "IMPLEMENTING" });
+  const result = applyExecutionOutcome(task, true, "Claude process completed successfully.");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "TESTING");
+  assert.equal(result.state.result, "Claude process completed successfully.");
+});
+
+test("applyExecutionOutcome moves IMPLEMENTING to FAILED on failure and records the result message", () => {
+  const task = activeTask({ phase: "IMPLEMENTING" });
+  const result = applyExecutionOutcome(task, false, "Execution failed to start: spawn claude ENOENT");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "FAILED");
+  assert.equal(result.state.result, "Execution failed to start: spawn claude ENOENT");
+});
+
+test("applyExecutionOutcome refuses a phase where the target transition isn't legal", () => {
+  // COMPLETED is terminal -- TRANSITIONS allows nothing out of it, including
+  // the escape hatches TESTING/FAILED would otherwise use.
+  const task = activeTask({ phase: "COMPLETED" });
+  const result = applyExecutionOutcome(task, true, "irrelevant");
+  assert.equal(result.ok, false);
+  assert.equal(result.state, task);
 });

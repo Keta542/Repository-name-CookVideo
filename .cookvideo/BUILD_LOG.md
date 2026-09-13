@@ -5,6 +5,68 @@ top.
 
 ---
 
+## 2026-09-13 — Milestone 8: persistent execute lifecycle transitions
+
+- Closed the last major gap in the task lifecycle: `execute` previously only *validated*
+  that a move into `IMPLEMENTING` would be legal (`validateExecutionTransition` in
+  `src/lib/execution.ts`) but never persisted it -- `TASK_STATE.json` stayed frozen at
+  whatever phase a task was already in no matter what execution actually did. This was the
+  direct cause of `ACTIVE_TASK.md`/`TASK_STATE.json` drift observed on the real
+  `MILESTONE-6-SEARCH-EMPTY-STATE-001` task (fixed as part of this milestone -- see below).
+- Added `beginImplementing` and `applyExecutionOutcome` (`src/lib/taskState.ts`), mirroring
+  `approveTask`'s single-hop check-and-apply pattern and built on the same `TRANSITIONS`
+  table every other lifecycle check already reads -- no parallel state machine.
+  `beginImplementing` moves `PLANNED`/`FAILED`/`BLOCKED` -> `IMPLEMENTING` (a no-op if
+  already there); `applyExecutionOutcome` moves `IMPLEMENTING` -> `TESTING` on a verified
+  success or -> `FAILED` on a spawn error, non-zero exit, or exit 0 with none of the
+  expected files actually changed (`FAILED` stays recoverable back to
+  `PLANNED`/`IMPLEMENTING` via the existing `RECOVERABLE_FROM_STUCK` path).
+- `runExecution` (`src/lib/execution.ts`) now calls these at the two real points that
+  matter: immediately *before* invoking Claude (so a crash mid-invocation still leaves
+  `TASK_STATE.json` showing the true in-flight phase, not a stale `PLANNED`) and immediately
+  after the outcome is known. Real execution now writes `TASK_STATE.json`, `ACTIVE_TASK.md`,
+  and a `BUILD_LOG.md` entry at each hop that actually changes the phase (via the same
+  `formatActiveTaskMarkdown`/`prependBuildLogEntry` helpers `plan`/`approve`/`complete`
+  already use, so the three documents can never be left disagreeing) -- dry-run remains
+  fully read-only, exactly as `.cookvideo/EXECUTION_POLICY.md` already specifies. Every
+  existing refusal path (no task, invalid transition, `REJECTED` approval, target mismatch)
+  is unchanged and still short-circuits before any write.
+- `ExecuteContext` gained `activeTaskPath`/`buildLogPath` fields (mirroring
+  `ApproveContext`/`CompleteContext`); `src/commands/execute.ts` wires them to the real
+  configured paths.
+- Fixed the drift this gap had already caused on the real, live task: `TASK_STATE.json`
+  showed `MILESTONE-6-SEARCH-EMPTY-STATE-001` as `COMPLETED` (set by an earlier version of
+  `cookvideo-agent complete`, before Milestone 7 taught that command to also write
+  `ACTIVE_TASK.md`) while `ACTIVE_TASK.md` still showed it as `PLANNED`. Regenerated
+  `ACTIVE_TASK.md` from the real `TASK_STATE.json` via the actual `formatActiveTaskMarkdown`
+  renderer (not hand-authored) so the two agree again.
+- Added `src/__tests__/taskState.test.ts` coverage for `beginImplementing`/
+  `applyExecutionOutcome` directly (the PLANNED/FAILED/BLOCKED -> IMPLEMENTING move, the
+  no-op-when-already-IMPLEMENTING case, refusal from a non-executable phase, both outcome
+  directions, and refusal when the target transition isn't legal), and extended
+  `src/__tests__/execution.test.ts` with end-to-end coverage of the new persistence: dry-run
+  never writes any of the three documents; a full `PLANNED -> IMPLEMENTING -> TESTING` run
+  persists correctly (asserting `TASK_STATE.json` already shows `IMPLEMENTING` *during* the
+  mocked Claude call, not just after); spawn-error and no-file-change failures both persist
+  `FAILED`; a `FAILED` task recovers through `IMPLEMENTING` back to `TESTING` on a later
+  successful run; no duplicate "started" `BUILD_LOG.md` entry is written when a task is
+  already `IMPLEMENTING`; and a target-mismatch refusal still writes nothing.
+- Verified live, end-to-end, against the real CLI and real `.cookvideo/` state: planned a
+  throwaway demo task (`MILESTONE-8-DEMO-001`, expecting `README.md` to change) with
+  `--replace`, then ran `cookvideo-agent execute --execute` with
+  `COOKVIDEO_AGENT_EXECUTION_MODE=local` and a deliberately nonexistent
+  `COOKVIDEO_AGENT_CLAUDE_COMMAND` -- confirmed `TASK_STATE.json` moved
+  `PLANNED -> IMPLEMENTING -> FAILED` for real, `ACTIVE_TASK.md` and this build log tracked
+  it at each hop, and (since the command never spawned) `README.md` was never touched. Reset
+  afterward and restored the real `MILESTONE-6-SEARCH-EMPTY-STATE-001` task exactly as it
+  was (still `COMPLETED`), with `ACTIVE_TASK.md` now correctly regenerated to match.
+- Did not modify CookVideo, add any Supabase/Vercel/Mux/GitHub integration, add commit/push/
+  deploy automation, or commit/push anything from this control plane. No existing lifecycle
+  transition, target-verification, or post-execution file-change-verification behavior was
+  weakened.
+- Verified: `npm run typecheck` (clean), `npm run lint` (clean), `npm test` (full suite, 150
+  tests, all passing).
+
 ## 2026-09-13 — Milestone 7: risk-based approval gate enforcement
 
 - Made the approval gate real. Previously, nothing ever forced a task into
@@ -53,6 +115,26 @@ top.
   transition, target-validation, or execution-verification behavior was weakened.
 - Verified: `npm run typecheck` (clean) and `npm test` (full suite, including all new tests,
   passing alongside every Milestone 1-6 test).
+
+## 2026-09-12 — Task planned via `cookvideo-agent plan`: MILESTONE-6-SEARCH-EMPTY-STATE-001
+
+- Objective: Update the CookVideo search page empty-state copy so it encourages the user to browse recipes instead of only suggesting a narrower search.
+- Risk level: LOW
+- Phase set to PLANNED; approvalStatus set to NOT_REQUIRED (approvalRequirements recorded for
+  later -- the approval workflow itself has not started).
+- Read-only with respect to CookVideo; did not invoke Claude, run `git commit`/`git push`, or
+  touch Supabase, Vercel, Mux, or GitHub.
+
+
+## 2026-09-09 — Task planned via `cookvideo-agent plan`: EXAMPLE-UI-COPY-001
+
+- Objective: Update the empty-state copy on the CookVideo saved-recipes screen so it points people toward the Discover tab instead of just saying 'No recipes saved yet.'
+- Risk level: LOW
+- Phase set to PLANNED; approvalStatus set to NOT_REQUIRED (approvalRequirements recorded for
+  later -- the approval workflow itself has not started).
+- Read-only with respect to CookVideo; did not invoke Claude, run `git commit`/`git push`, or
+  touch Supabase, Vercel, Mux, or GitHub.
+
 
 ## 2026-09-09 — Task planned via `cookvideo-agent plan`: EXAMPLE-UI-COPY-001
 

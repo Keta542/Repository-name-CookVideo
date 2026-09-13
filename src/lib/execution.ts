@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -8,7 +9,16 @@ import {
   type ClaudeExecutionResult,
   type ImplementationBrief,
 } from "../agents/claude.js";
-import { isValidTransition, loadTaskState, type TaskState } from "./taskState.js";
+import { formatActiveTaskMarkdown, prependBuildLogEntry } from "./plan.js";
+import {
+  applyExecutionOutcome,
+  beginImplementing,
+  isValidTransition,
+  loadTaskState,
+  saveTaskState,
+  type TaskPhase,
+  type TaskState,
+} from "./taskState.js";
 import type { ExecutionMode } from "../config.js";
 
 // ---------------------------------------------------------------------------
@@ -123,6 +133,58 @@ export function validateExpectedTargets(filesExpectedToChange: string[], cwd: st
 }
 
 // ---------------------------------------------------------------------------
+// Post-execution verification (did Claude actually change what it was asked to)
+//
+// A Claude process exiting 0 only means the process itself didn't error --
+// it says nothing about whether Claude actually edited the file(s) the task
+// named. Content hashes (not mtimes, which can be too coarse on some
+// filesystems for two writes within the same execution) are taken of every
+// filesExpectedToChange path before Claude runs and compared against the
+// same paths afterward; any mismatch counts as a real change.
+// ---------------------------------------------------------------------------
+
+function hashFileIfExists(filePath: string): string | null {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+// Keyed by the task's original relative path (not the resolved absolute
+// path) so callers never need to re-derive or re-validate it against cwd.
+export function snapshotExpectedFiles(filesExpectedToChange: string[], cwd: string): Map<string, string | null> {
+  const snapshot = new Map<string, string | null>();
+  for (const relativePath of filesExpectedToChange) {
+    const resolved = resolveExpectedTargetPath(cwd, relativePath);
+    snapshot.set(relativePath, resolved !== null ? hashFileIfExists(resolved) : null);
+  }
+  return snapshot;
+}
+
+export interface ExpectedFilesChangeCheck {
+  changed: boolean;
+  changedPaths: string[];
+}
+
+// Compares a snapshot taken before Claude ran against the current state of
+// the same paths. filesExpectedToChange has already passed
+// validateExpectedTargets by the time this runs, so every path existed
+// beforehand -- but this makes no assumption about that, since a hash of
+// `null` (path missing) still compares correctly either way.
+export function verifyExpectedFilesChanged(
+  before: Map<string, string | null>,
+  filesExpectedToChange: string[],
+  cwd: string,
+): ExpectedFilesChangeCheck {
+  const changedPaths = filesExpectedToChange.filter((relativePath) => {
+    const resolved = resolveExpectedTargetPath(cwd, relativePath);
+    const after = resolved !== null ? hashFileIfExists(resolved) : null;
+    return after !== before.get(relativePath);
+  });
+  return { changed: changedPaths.length > 0, changedPaths };
+}
+
+// ---------------------------------------------------------------------------
 // Implementation brief
 // ---------------------------------------------------------------------------
 
@@ -158,6 +220,10 @@ export interface ExecutionRecord {
   outcome: string;
   exitCode: number | null;
   spawnError: string | null;
+  // null when verification never ran (dry-run, a failed/non-zero attempt, or
+  // no filesExpectedToChange to check); otherwise the expected paths that
+  // were actually found to differ from their pre-execution state.
+  filesChanged: string[] | null;
 }
 
 function readExecutionLog(logPath: string): ExecutionRecord[] {
@@ -188,11 +254,66 @@ export function appendExecutionRecord(logPath: string, record: ExecutionRecord):
 }
 
 // ---------------------------------------------------------------------------
+// Persisted lifecycle transitions (Milestone 8)
+//
+// Real execution only -- dry-run never calls saveTaskState/writes
+// ACTIVE_TASK.md/BUILD_LOG.md, matching EXECUTION_POLICY.md's "DRY-RUN
+// prepares and displays only." Each hop writes all three control-plane
+// documents together (mirroring src/commands/approve.ts and
+// src/commands/complete.ts) so they can never be left disagreeing --
+// including the intermediate IMPLEMENTING hop, so a crash mid-Claude-call
+// still leaves TASK_STATE.json/ACTIVE_TASK.md showing the true in-flight
+// phase rather than a stale PLANNED.
+// ---------------------------------------------------------------------------
+
+function executeStartBuildLogEntry(state: TaskState, previousPhase: TaskPhase): string {
+  return [
+    `## ${new Date().toISOString().slice(0, 10)} — Task execution started via \`cookvideo-agent execute\`: ${state.taskId ?? "(unknown)"}`,
+    "",
+    `- Phase: ${previousPhase} -> ${state.phase}.`,
+    "- Claude is being invoked locally against the approved execution target; this control plane",
+    "  has not committed, pushed, or deployed anything.",
+    "",
+  ].join("\n");
+}
+
+function executeOutcomeBuildLogEntry(state: TaskState, previousPhase: TaskPhase): string {
+  return [
+    `## ${new Date().toISOString().slice(0, 10)} — Task execution outcome via \`cookvideo-agent execute\`: ${state.taskId ?? "(unknown)"}`,
+    "",
+    `- Phase: ${previousPhase} -> ${state.phase}.`,
+    `- Result: ${state.result ?? "(none)"}`,
+    "- No commit, push, or deployment was performed by this command.",
+    "",
+  ].join("\n");
+}
+
+// Persists a transition -- TASK_STATE.json, ACTIVE_TASK.md, and a
+// BUILD_LOG.md entry together -- only when it actually changed anything
+// (mirrors the `result.state !== state` guard approve.ts/complete.ts
+// already use, so a no-op transition never writes a duplicate entry).
+function persistTransition(
+  ctx: ExecuteContext,
+  from: TaskState,
+  to: TaskState,
+  entryMarkdown: (state: TaskState, previousPhase: TaskPhase) => string,
+): void {
+  if (to === from) {
+    return;
+  }
+  saveTaskState(ctx.taskStatePath, to);
+  fs.writeFileSync(ctx.activeTaskPath, formatActiveTaskMarkdown(to), "utf8");
+  prependBuildLogEntry(ctx.buildLogPath, entryMarkdown(to, from.phase));
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
 export interface ExecuteContext {
   taskStatePath: string;
+  activeTaskPath: string;
+  buildLogPath: string;
   executionLogPath: string;
   briefsDir: string;
   claudeCommand: string;
@@ -229,6 +350,8 @@ export interface RunExecuteResult {
   // null except in the one scenario where filesExpectedToChange failed
   // target verification -- see validateExpectedTargets.
   targetMismatch: TargetMismatchInfo | null;
+  // Mirrors ExecutionRecord.filesChanged -- see there for when this is null.
+  filesChanged: string[] | null;
 }
 
 function refusal(state: TaskState, message: string): RunExecuteResult {
@@ -242,6 +365,7 @@ function refusal(state: TaskState, message: string): RunExecuteResult {
     result: null,
     message,
     targetMismatch: null,
+    filesChanged: null,
   };
 }
 
@@ -269,6 +393,7 @@ function targetMismatchRefusal(state: TaskState, targetPath: string, missingPath
       targetPath,
       requiresHumanApproval: true,
     },
+    filesChanged: null,
   };
 }
 
@@ -312,11 +437,17 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
     fs.mkdirSync(ctx.briefsDir, { recursive: true });
   }
   const briefFilePath = path.join(ctx.briefsDir, `${brief.taskId}.md`);
-  fs.writeFileSync(briefFilePath, formatImplementationBrief(brief), "utf8");
+  const briefContent = formatImplementationBrief(brief);
+  // The brief file on disk (briefFilePath) is kept purely as an auditable
+  // record of exactly what was prepared for this attempt -- it is never
+  // itself read back or passed to Claude. The actual instructions Claude
+  // receives are the brief's rendered contents, given directly to
+  // buildClaudeCommand below.
+  fs.writeFileSync(briefFilePath, briefContent, "utf8");
 
   const command = buildClaudeCommand({
     claudeCommand: ctx.claudeCommand,
-    briefFilePath,
+    briefContent,
     cwd: ctx.cwd,
   });
 
@@ -329,6 +460,11 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
   let result: ClaudeExecutionResult | null = null;
   let message: string;
   let ok = true;
+  let filesChanged: string[] | null = null;
+  // Tracks the persisted TaskState across the two transition points below.
+  // Stays exactly equal to `state` for a dry-run (never mutated, never
+  // saved) -- only real execution advances it.
+  let currentState = state;
 
   if (dryRun) {
     const reason =
@@ -339,7 +475,21 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
           : "the --execute flag was not passed and COOKVIDEO_AGENT_EXECUTION_MODE is not \"local\"";
     message = `DRY-RUN: no command was executed because ${reason}. This is the safe default -- see .cookvideo/EXECUTION_POLICY.md.`;
   } else {
+    // Persist the move into IMPLEMENTING *before* invoking Claude, not
+    // after -- so a crash mid-invocation still leaves TASK_STATE.json
+    // showing the true in-flight phase rather than a stale PLANNED. Never
+    // expected to fail here (validateExecutionTransition above already
+    // confirmed this exact move is legal), but never invoked from a phase
+    // this control plane hasn't itself just validated either.
+    const beginResult = beginImplementing(currentState);
+    persistTransition(ctx, currentState, beginResult.state, executeStartBuildLogEntry);
+    currentState = beginResult.state;
+
     const invoke = ctx.invoke ?? invokeClaude;
+    // Taken before invoking, not after -- this has to capture the state
+    // Claude found the files in, not whatever they happen to look like once
+    // the process has already run.
+    const beforeSnapshot = snapshotExpectedFiles(brief.filesExpectedToChange, ctx.cwd);
     result = await invoke(command);
     if (result.spawnError !== null) {
       ok = false;
@@ -347,9 +497,33 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
     } else if (result.exitCode !== 0) {
       ok = false;
       message = `Claude process exited with code ${String(result.exitCode)}.`;
+    } else if (brief.filesExpectedToChange.length === 0) {
+      // Nothing to verify -- matches validateExpectedTargets' existing
+      // "empty list always passes" treatment.
+      message = "Claude process completed successfully (exit code 0). No filesExpectedToChange were recorded to verify.";
     } else {
-      message = "Claude process completed successfully (exit code 0).";
+      const verification = verifyExpectedFilesChanged(beforeSnapshot, brief.filesExpectedToChange, ctx.cwd);
+      filesChanged = verification.changedPaths;
+      if (!verification.changed) {
+        // This is the core bug this module exists to catch: exit code 0
+        // alone is not proof of implementation work. If none of the files
+        // the task named actually changed, Claude did not do the work,
+        // regardless of what its exit code says.
+        ok = false;
+        message =
+          `Claude process exited with code 0, but completed without producing the expected ` +
+          `file changes. None of the following changed: ${brief.filesExpectedToChange.join(", ")}.`;
+      } else {
+        message = `Claude process completed successfully and changed the expected file(s): ${filesChanged.join(", ")}.`;
+      }
     }
+
+    // Persist the outcome -- verified success advances to TESTING; a spawn
+    // error, non-zero exit, or exit 0 with nothing actually changed all move
+    // the task to FAILED (recoverable back to PLANNED/IMPLEMENTING).
+    const outcomeResult = applyExecutionOutcome(currentState, ok, message);
+    persistTransition(ctx, currentState, outcomeResult.state, executeOutcomeBuildLogEntry);
+    currentState = outcomeResult.state;
   }
 
   const record: ExecutionRecord = {
@@ -364,18 +538,20 @@ export async function runExecution(ctx: ExecuteContext): Promise<RunExecuteResul
     outcome: message,
     exitCode: result?.exitCode ?? null,
     spawnError: result?.spawnError ?? null,
+    filesChanged,
   };
   appendExecutionRecord(ctx.executionLogPath, record);
 
   return {
     ok,
     dryRun,
-    state,
+    state: currentState,
     brief,
     briefFilePath,
     command,
     result,
     message,
     targetMismatch: null,
+    filesChanged,
   };
 }

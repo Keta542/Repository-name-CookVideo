@@ -311,20 +311,114 @@ export function resetTaskState(): TaskState {
 }
 
 // ---------------------------------------------------------------------------
+// execute (persisted lifecycle transitions -- Milestone 8)
+// ---------------------------------------------------------------------------
+
+// Prior to Milestone 8, `execute` only *validated* that a move into
+// IMPLEMENTING would be legal (validateExecutionTransition in
+// src/lib/execution.ts) -- it never actually persisted that transition, so
+// TASK_STATE.json stayed frozen at whatever phase the task was already in,
+// no matter how many times execution ran or what happened. These two
+// functions are what src/lib/execution.ts now calls to make those
+// transitions real, using the exact same TRANSITIONS table every other
+// lifecycle check in this file already reads -- no parallel state machine.
+export interface ExecutionTransitionResult {
+  ok: boolean;
+  state: TaskState;
+  message: string;
+}
+
+// Called immediately before Claude is actually invoked (real execution
+// only -- dry-run never calls this, since nothing is actually happening
+// yet). A no-op if the task is already IMPLEMENTING (e.g. a retry of a
+// previously-attempted task); otherwise moves it there. Defensively
+// refuses if TRANSITIONS doesn't allow the move -- this should be
+// unreachable in practice, since validateExecutionTransition already
+// checked the exact same condition earlier in the same `execute` run, but
+// this function never assumes that check happened and never invents a
+// transition TRANSITIONS doesn't already define.
+export function beginImplementing(state: TaskState): ExecutionTransitionResult {
+  if (state.phase === "IMPLEMENTING") {
+    return {
+      ok: true,
+      state,
+      message: `Task ${state.taskId ?? "(unknown)"} is already IMPLEMENTING.`,
+    };
+  }
+  if (!isValidTransition(state.phase, "IMPLEMENTING")) {
+    return {
+      ok: false,
+      state,
+      message: `Task ${state.taskId ?? "(unknown)"} is in phase ${state.phase}, which cannot move to IMPLEMENTING.`,
+    };
+  }
+  const nextState: TaskState = {
+    ...state,
+    phase: "IMPLEMENTING",
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    ok: true,
+    state: nextState,
+    message: `Task ${state.taskId ?? "(unknown)"} moved ${state.phase} -> IMPLEMENTING.`,
+  };
+}
+
+// Called once a real Claude invocation attempted from IMPLEMENTING has
+// finished. Verified file changes (succeeded=true) advance the task to
+// TESTING -- this does not mean any test actually ran; it only means
+// "implementation attempted and confirmed, tests not yet run," matching the
+// forward-path semantics IMPLEMENTING -> TESTING already documents.
+// Anything else (a spawn error, a non-zero exit, or exit 0 with none of the
+// expected files actually changed -- see verifyExpectedFilesChanged in
+// src/lib/execution.ts) moves the task to FAILED, which stays recoverable
+// back to PLANNED/IMPLEMENTING via the existing RECOVERABLE_FROM_STUCK path.
+// `resultMessage` is stored verbatim in `result`, the same field
+// `completeTask` already uses to record its own outcome.
+export function applyExecutionOutcome(
+  state: TaskState,
+  succeeded: boolean,
+  resultMessage: string,
+): ExecutionTransitionResult {
+  const nextPhase: TaskPhase = succeeded ? "TESTING" : "FAILED";
+  if (!isValidTransition(state.phase, nextPhase)) {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId ?? "(unknown)"} is in phase ${state.phase}, which cannot move to ` +
+        `${nextPhase}. Execution outcome was not persisted.`,
+    };
+  }
+  const nextState: TaskState = {
+    ...state,
+    phase: nextPhase,
+    result: resultMessage,
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    ok: true,
+    state: nextState,
+    message: `Task ${state.taskId ?? "(unknown)"} moved ${state.phase} -> ${nextPhase}.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // complete
 // ---------------------------------------------------------------------------
 
-// The canonical forward-only path from PLANNED to COMPLETED. No command in
-// this control plane currently writes TESTING/REVIEW/APPROVAL_REQUIRED/
-// COMMITTING/DEPLOYING/VERIFYING to disk -- `execute` only validates a move
-// into IMPLEMENTING without persisting it, and `approve` only handles the
-// single APPROVAL_REQUIRED -> APPROVED hop. So a task whose implementation
-// was actually carried out (via `execute`, verified by its file-change
-// check) and committed has nowhere left to record that fact. `completeTask`
-// closes that gap by validating the *entire* remaining walk to COMPLETED
-// against the existing TRANSITIONS table (the same table isValidTransition
-// already reads) -- it does not add any new transition, it only allows a
-// single call to validate and apply the sequence of existing ones at once.
+// The canonical forward-only path from PLANNED to COMPLETED. `execute`
+// (Milestone 8) now persists PLANNED/FAILED/BLOCKED -> IMPLEMENTING ->
+// TESTING/FAILED via beginImplementing/applyExecutionOutcome just above, and
+// `approve` only handles the single APPROVAL_REQUIRED -> APPROVED hop.
+// Nothing yet persists REVIEW/APPROVAL_REQUIRED/COMMITTING/DEPLOYING/
+// VERIFYING on its own, so a task that reached TESTING and was reviewed/
+// committed outside this control plane still has no way to record every
+// intermediate hop. `completeTask` closes that gap by validating the
+// *entire* remaining walk to COMPLETED against the existing TRANSITIONS
+// table (the same table isValidTransition already reads) -- it does not add
+// any new transition, it only allows a single call to validate and apply
+// the sequence of existing ones at once.
 const FORWARD_PATH_TO_COMPLETION: readonly TaskPhase[] = [
   "PLANNED",
   "IMPLEMENTING",

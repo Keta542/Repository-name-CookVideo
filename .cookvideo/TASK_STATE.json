@@ -1,15 +1,21 @@
 {
-  "taskId": null,
-  "objective": null,
-  "scope": null,
-  "phase": "PLANNED",
-  "riskLevel": null,
-  "approvalStatus": "NOT_REQUIRED",
-  "filesExpectedToChange": [],
-  "testsRequired": [],
-  "requestedChanges": [],
+  "requestedChanges": [
+    "Update the 'No recipes found' empty-state copy in apps/web/src/app/search/page.tsx.",
+    "Keep the existing empty-state structure and styling unchanged.",
+    "Use concise copy that suggests browsing all recipes as an alternative to changing the search."
+  ],
   "approvalRequirements": [],
-  "result": null,
-  "createdAt": null,
-  "updatedAt": null
+  "taskId": "MILESTONE-6-SEARCH-EMPTY-STATE-001",
+  "objective": "Update the CookVideo search page empty-state copy so it encourages the user to browse recipes instead of only suggesting a narrower search.",
+  "scope": "UI copy only, within the search results empty-state block. No changes to data fetching, search logic, navigation logic, authentication, or any other screen.",
+  "phase": "COMPLETED",
+  "riskLevel": "LOW",
+  "approvalStatus": "NOT_REQUIRED",
+  "filesExpectedToChange": [
+    "apps/web/src/app/search/page.tsx"
+  ],
+  "testsRequired": [],
+  "result": "Completed. CookVideo commit: c8b7df8",
+  "createdAt": "2026-09-12T07:14:42.253Z",
+  "updatedAt": "2026-09-12T20:40:40.374Z"
 }

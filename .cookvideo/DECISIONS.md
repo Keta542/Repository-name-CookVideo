@@ -212,3 +212,67 @@ it to `APPROVED`, after which re-running `complete` finishes the remaining hops 
   refuses without moving the phase further, since the lifecycle has no transition backwards
   into `APPROVAL_REQUIRED` -- this is untested against real usage since it is currently
   unreachable, only defensive.
+
+---
+
+## 2026-09-13 — Persist `execute`'s lifecycle transitions inside `runExecution` (Milestone 8)
+
+**Problem:** Milestone 7's decision above deliberately deferred this: `execute` validated
+that a move into `IMPLEMENTING` would be legal but never persisted it, so `TASK_STATE.json`
+stayed frozen at whatever phase a task was already in regardless of what execution actually
+did. This was silently producing incorrect state: the real
+`MILESTONE-6-SEARCH-EMPTY-STATE-001` task showed `COMPLETED` in `TASK_STATE.json` (set by an
+older `complete` command, before it wrote `ACTIVE_TASK.md`) while `ACTIVE_TASK.md` still
+showed `PLANNED` -- a live instance of exactly the drift `README.md`/`ACTIVE_TASK.md` promise
+never happens.
+
+**Options considered:**
+1. Leave `execute` as validation-only and add a separate command (e.g. `cookvideo-agent
+   advance`) a human or the planner would run afterward to record what happened.
+2. Have `runExecution` persist the transition, but only once, at the very end of the attempt
+   (skip the intermediate `IMPLEMENTING` write).
+3. Have `runExecution` persist two real transitions: `PLANNED`/`FAILED`/`BLOCKED` →
+   `IMPLEMENTING` immediately before invoking Claude, and `IMPLEMENTING` → `TESTING`/`FAILED`
+   immediately after the outcome is known -- both via small, defensive helper functions in
+   `src/lib/taskState.ts` built on the existing `TRANSITIONS` table.
+
+**Decision:** Option 3. Added `beginImplementing` and `applyExecutionOutcome`
+(`src/lib/taskState.ts`), mirroring `approveTask`'s single-hop check-and-apply shape.
+`runExecution` calls `beginImplementing` right before `invoke(command)` and
+`applyExecutionOutcome` right after the outcome (spawn error / exit code / verified file
+change) is determined; each call that actually changes the phase writes `TASK_STATE.json`,
+`ACTIVE_TASK.md`, and a `BUILD_LOG.md` entry together (the same
+`formatActiveTaskMarkdown`/`prependBuildLogEntry` helpers `plan`/`approve`/`complete` already
+use). Dry-run calls neither function and writes nothing, matching
+`.cookvideo/EXECUTION_POLICY.md`.
+
+**Why:**
+- Option 2 (single write) would mean a process that dies mid-Claude-call (a real, plausible
+  failure mode for a potentially long-running local process) leaves `TASK_STATE.json` showing
+  a stale `PLANNED`/`FAILED` instead of the true in-flight `IMPLEMENTING` -- exactly the kind
+  of silent incorrect state this control plane exists to prevent. The two-write approach
+  costs one extra file write per real execution in exchange for that crash-safety property.
+- Option 1 (a separate command) repeats the exact critique Milestone 7 made of adding a new
+  command for its own gate: one more step a human or the planner has to remember to run
+  correctly, when the orchestration layer that already knows the outcome (`runExecution`) is
+  the one true place to record it.
+- No new lifecycle phase or transition was added -- `beginImplementing`/
+  `applyExecutionOutcome` both call `isValidTransition` against the same `TRANSITIONS` table
+  every other check in this codebase already reads, and both refuse (returning the state
+  unchanged) rather than force a transition the table doesn't already allow.
+- Fixed the concrete drift this gap had already caused on the real task, by regenerating
+  `ACTIVE_TASK.md` from the real `TASK_STATE.json` via the actual `formatActiveTaskMarkdown`
+  renderer rather than hand-editing either file.
+
+**Known limitations:**
+- `TESTING` is reached purely because Claude's process exited 0 and the expected files
+  verifiably changed -- no test runner is invoked or consulted. The phase name records "ready
+  for testing," not "tests passed"; actual test automation remains future scope.
+- `REVIEW`/`APPROVAL_REQUIRED`/`COMMITTING`/`DEPLOYING`/`VERIFYING` still have no command that
+  persists a task into them directly -- `completeTask` (Milestone 7) remains the only way past
+  `TESTING`, by validating and applying the entire remaining walk at once. A more granular
+  `review`/`commit` step-by-step flow is still future work.
+- The pre-invoke `IMPLEMENTING` write assumes a single in-flight `execute` invocation at a
+  time -- there is no locking. Two concurrent `execute` runs against the same `TASK_STATE.json`
+  could race; this was already true before this milestone (both would have read the same
+  starting state) and is not newly introduced, but it is also not newly addressed.

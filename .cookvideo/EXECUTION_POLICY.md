@@ -93,6 +93,13 @@ Only reachable when `COOKVIDEO_AGENT_EXECUTION_MODE=local` **and** `--execute` i
   `EXECUTION_TARGETS` list.
 - Tests may run.
 - `git diff`/`git status` may be inspected.
+- **The task's lifecycle phase is now persisted (Milestone 8):** immediately before Claude
+  is invoked, `TASK_STATE.json` (plus `ACTIVE_TASK.md`/`BUILD_LOG.md`) is updated to
+  `IMPLEMENTING`; once the attempt finishes, it is updated again to `TESTING` (verified
+  success) or `FAILED` (spawn error, non-zero exit, or exit 0 with none of the expected
+  files actually changed). This only ever moves a task along transitions
+  `src/lib/taskState.ts`'s `TRANSITIONS` table already allows — it never introduces a new
+  one, and it never touches commit/push/deploy or production systems.
 - **Commit and push remain approval-gated** — exactly as in `APPROVAL_POLICY.md`. Local
   execution mode does not commit or push anything by itself.
 - **Production systems remain approval-gated** — Supabase, Vercel, Mux, GitHub, and any

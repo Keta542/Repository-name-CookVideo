@@ -36,6 +36,14 @@ application. See the CookVideo repository's own docs for the application's archi
 CookVideoAgent must never write into, commit to, or push the CookVideo repository. Every
 command through Milestone 4 is read-only with respect to CookVideo.
 
+Both repositories are registered, by name, as the only two entries in `EXECUTION_TARGETS`
+(`src/config.ts`) — the closed list `cookvideo-agent execute --target <name>` selects a
+Claude working directory from (see `.cookvideo/EXECUTION_POLICY.md`). CookVideoAgent remains
+the default target, so existing invocations without `--target` are unaffected. Naming
+CookVideo as a target only changes where Claude's working directory may point when a human
+explicitly asks for it; it does not grant write access to `C:\Users\aesfm` generally, and it
+does not change anything in `APPROVAL_POLICY.md` about commit, push, or production actions.
+
 ## The planner → task → execution pipeline
 
 ```
@@ -48,16 +56,23 @@ cookvideo-agent plan --file <path> [--replace]
    │  writes TASK_STATE.json + ACTIVE_TASK.md + a BUILD_LOG.md entry
    ▼
 TASK_STATE.json  (phase: PLANNED, approvalStatus: NOT_REQUIRED)
-   │  a human (or a future milestone's own automation) advances the task
-   │  through IMPLEMENTING → TESTING → REVIEW → APPROVAL_REQUIRED → APPROVED
-   │  → COMMITTING → DEPLOYING → VERIFYING → COMPLETED (src/lib/taskState.ts)
    ▼
 cookvideo-agent execute [--execute]
-   │  prepares an implementation brief from the current TASK_STATE.json and,
-   │  only with the double gate (--execute AND EXECUTION_MODE=local), invokes
-   │  Claude locally via src/agents/claude.ts
+   │  prepares an implementation brief from the current TASK_STATE.json; only with the
+   │  double gate (--execute AND EXECUTION_MODE=local) does it persist
+   │  PLANNED/FAILED/BLOCKED → IMPLEMENTING and invoke Claude locally via
+   │  src/agents/claude.ts, then persist the outcome as IMPLEMENTING → TESTING
+   │  (verified success) or → FAILED (spawn error, non-zero exit, or no verified file
+   │  change) — see src/lib/taskState.ts's beginImplementing/applyExecutionOutcome.
+   │  Dry-run persists nothing.
    ▼
 Claude (implementation engineer) — reads/edits CookVideo, runs tests, reports back
+   ▼
+TASK_STATE.json  (phase: TESTING or FAILED)
+   │  a human (or a future milestone's own automation) advances a TESTING task the
+   │  rest of the way: REVIEW → APPROVAL_REQUIRED → APPROVED → COMMITTING → DEPLOYING
+   │  → VERIFYING → COMPLETED (src/lib/taskState.ts; `cookvideo-agent complete` can
+   │  validate and apply that whole remaining walk at once)
 ```
 
 `plan` only ever produces a `PLANNED` task. It never edits CookVideo, never invokes Claude,
@@ -112,7 +127,29 @@ check replacement safety → write).
 
 ## Current milestone
 
-**Milestone 7 (this one):** risk-based approval gate enforcement. Previously, nothing ever
+**Milestone 8 (this one):** persistent execute lifecycle transitions. Previously, `execute`
+only *validated* that a move into `IMPLEMENTING` would be legal
+(`validateExecutionTransition`, `src/lib/execution.ts`) but never persisted it —
+`TASK_STATE.json` stayed frozen at whatever phase a task was already in no matter what
+execution actually did, which was the direct cause of the `ACTIVE_TASK.md`/`TASK_STATE.json`
+drift observed on the real `MILESTONE-6-SEARCH-EMPTY-STATE-001` task (fixed as part of this
+milestone). `runExecution` now persists two real transitions during a genuine (non-dry-run)
+attempt, via two new `src/lib/taskState.ts` functions built on the same `TRANSITIONS` table
+every other lifecycle check already reads: `beginImplementing` moves
+`PLANNED`/`FAILED`/`BLOCKED` → `IMPLEMENTING` immediately *before* Claude is invoked (so a
+crash mid-invocation still leaves `TASK_STATE.json` showing the true in-flight phase, not a
+stale `PLANNED`), and `applyExecutionOutcome` moves `IMPLEMENTING` → `TESTING` on a verified
+success or → `FAILED` on a spawn error, non-zero exit, or exit 0 with none of the expected
+files actually changed (`FAILED` remains recoverable back to `PLANNED`/`IMPLEMENTING`). Each
+hop that actually changes the phase writes `TASK_STATE.json`, `ACTIVE_TASK.md`, and a
+`BUILD_LOG.md` entry together (via the same `formatActiveTaskMarkdown`/
+`prependBuildLogEntry` helpers `plan`/`approve`/`complete` already use), so the three
+documents can never be left disagreeing; dry-run remains fully read-only, unchanged from
+`.cookvideo/EXECUTION_POLICY.md`. Every existing refusal path (no task, invalid transition,
+`REJECTED` approval, target mismatch) still short-circuits before any write. See
+`.cookvideo/BUILD_LOG.md` for the full change list and live-verification notes.
+
+**Milestone 7:** risk-based approval gate enforcement. Previously, nothing ever
 forced a task into `APPROVAL_REQUIRED`/`PENDING`, so `completeTask` (`src/lib/taskState.ts`)
 could move any task straight to `COMPLETED` regardless of its declared `riskLevel` or
 `approvalRequirements` — the approval gate existed in the data model but was never actually
