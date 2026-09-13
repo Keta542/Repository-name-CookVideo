@@ -5,6 +5,47 @@ top.
 
 ---
 
+## 2026-09-13 — Milestone 9: restore build integrity; add a verification-claim rule
+
+- Discovered that the pushed `master` HEAD (`00ae823`) did not compile: `tsc --noEmit`, run
+  against an isolated `git worktree` checked out at that HEAD (not the working tree),
+  produced 10 type errors. Cause: `src/lib/execution.ts`, `src/commands/execute.ts`, and
+  `src/__tests__/execution.test.ts` were already committed calling the new stdin-based
+  `buildClaudeCommand({ ..., briefContent })` / reading `ClaudeExecutionCommand.input`, but
+  `src/agents/claude.ts` -- which defines that interface -- was never committed to match; it
+  was still at its pre-fix `briefFilePath`-as-argv shape.
+- Committed the already-written, already-tested, already live-verified fix that had been
+  sitting uncommitted: `src/agents/claude.ts` now invokes Claude non-interactively (`-p
+  --permission-mode acceptEdits`), feeds the implementation brief to the child process over
+  stdin instead of passing a bare file path as an argv value, and adds Windows
+  `shell:true`/quoting handling (`resolveSpawnOptions`/`quoteForWindowsShell`) needed to spawn
+  the `claude.cmd` shim. Committed alongside its test coverage (`src/__tests__/claude.test.ts`)
+  and the real, unedited execution history (`.cookvideo/EXECUTION_LOG.json`) that proves it:
+  the log shows the exact failure progression this fix resolves, ending in a real, successful
+  edit to `apps/web/src/app/search/page.tsx` in the real CookVideo repository.
+- Committed a second, separate, unrelated file that had accumulated in the same dirty working
+  tree: `src/__tests__/config.test.ts`, test-coverage backfill for the execution-target
+  registry (`resolveExecutionTarget`/`listExecutionTargetNames`) already committed in
+  Milestone 4. Kept as its own commit rather than folded into the fix commit, so the fix's
+  diff stays attributable to exactly the bug it fixes.
+- Added a `.cookvideo/DECISIONS.md` entry recording the gap (an interface change committed on
+  one side but not the other, with no decision record for it) and the fix.
+- Added an `npm run verify` script (`package.json`): `tsc --noEmit && eslint src && npm test`
+  in one command.
+- Documented a new rule (`.cookvideo/ARCHITECTURE.md`): a milestone's `BUILD_LOG.md` entry may
+  only report `npm run verify` results against a clean `git status` -- i.e. describing what's
+  actually at HEAD, never a dirty working tree. This directly targets the failure mode this
+  milestone exists to close: Milestones 6-8's "verified" claims were only ever true of an
+  uncommitted local working tree.
+- Did not modify CookVideo, add any Supabase/Vercel/Mux/GitHub integration, add commit/push/
+  deploy automation, change `.cookvideo/APPROVAL_POLICY.md`, or add any git hook/CI. No
+  existing lifecycle transition, target-verification, approval-gate, or post-execution
+  file-change-verification behavior was touched.
+- Verified: `npm run verify` (typecheck + lint + full test suite, 150/150 passing) run against
+  a clean `git status` at the resulting HEAD, confirmed via an isolated `git worktree`
+  checkout of the new commits (not just the pre-existing working tree) -- the same check this
+  milestone's own rule now requires going forward.
+
 ## 2026-09-13 — Milestone 8: persistent execute lifecycle transitions
 
 - Closed the last major gap in the task lifecycle: `execute` previously only *validated*

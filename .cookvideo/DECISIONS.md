@@ -276,3 +276,87 @@ use). Dry-run calls neither function and writes nothing, matching
   time -- there is no locking. Two concurrent `execute` runs against the same `TASK_STATE.json`
   could race; this was already true before this milestone (both would have read the same
   starting state) and is not newly introduced, but it is also not newly addressed.
+
+---
+
+## 2026-09-13 — Commit the already-verified Claude invocation fix; add a build-integrity
+verification rule (Milestone 9)
+
+**Problem:** The committed, pushed `master` HEAD (`00ae823`, "Persist execute lifecycle
+transitions") did not compile. `src/lib/execution.ts`, `src/commands/execute.ts`, and
+`src/__tests__/execution.test.ts` were all already committed calling the new stdin-based
+`buildClaudeCommand({ ..., briefContent })` / reading `ClaudeExecutionCommand.input`, but
+`src/agents/claude.ts` -- the file defining that interface -- was never committed to match; it
+was still at its pre-fix `briefFilePath`-as-argv shape. This was confirmed by running
+`tsc --noEmit` against an isolated `git worktree` checked out at that HEAD (not the working
+tree), which produced 10 type errors. As a direct consequence, every "Verified: npm run
+typecheck (clean)... npm test (all passing)" claim recorded in Milestones 6-8's
+`.cookvideo/BUILD_LOG.md` entries was only ever true of an uncommitted local working tree,
+never of what actually reached `origin/master` -- a direct violation of this project's own
+stated premise (`ARCHITECTURE.md`: "a shared, verifiable view of ground truth... rather than
+what anyone remembers or assumes").
+
+The four files left uncommitted going into this milestone were not new work-in-progress --
+three of them were exactly the missing fix: `src/agents/claude.ts` switches Claude invocation
+to non-interactive mode (`-p --permission-mode acceptEdits`), pipes the implementation brief
+over the child process's stdin instead of passing a bare file path as an argv value, and adds
+Windows `shell:true`/quoting handling (`resolveSpawnOptions`/`quoteForWindowsShell`) required
+to spawn the `claude.cmd` shim (`spawn EINVAL` without it). `.cookvideo/EXECUTION_LOG.json`'s
+real, unedited history proves the fix works: real local execution attempts against CookVideo
+show the exact failure progression this fix resolves (`spawn claude ENOENT` -> `spawn EINVAL`
+-> exit code 0 with zero files changed, twice -> exit code 0 with
+`apps/web/src/app/search/page.tsx` actually changed in the real CookVideo repository) -- this
+is the concrete mechanism by which `MILESTONE-6-SEARCH-EMPTY-STATE-001` ever reached
+`COMPLETED` with a real CookVideo commit hash (`c8b7df8`). The fourth uncommitted file,
+`src/__tests__/config.test.ts`, was an unrelated test-coverage backfill for
+`resolveExecutionTarget`/`listExecutionTargetNames` (already committed in Milestone 4,
+`880582a`) that had simply accumulated in the same dirty working tree -- not part of this bug
+fix.
+
+**Options considered:**
+1. Commit all uncommitted files together in one commit, restoring green state in a single
+   step.
+2. Commit the `claude.ts` fix and its own test/log evidence as one focused commit, the
+   unrelated `config.test.ts` backfill as a second separate commit, and the process
+   documentation/safeguard as a third -- keeping each commit's diff attributable to exactly
+   one concern.
+3. Leave the fix uncommitted and only add the verification safeguard, relying on a future
+   milestone to notice and commit it.
+
+**Decision:** Option 2. Three commits: (a) `src/agents/claude.ts` + `src/__tests__/claude.test.ts`
++ `.cookvideo/EXECUTION_LOG.json` -- the verified fix and its evidence; (b)
+`src/__tests__/config.test.ts` alone; (c) this `DECISIONS.md` entry, the accompanying
+`BUILD_LOG.md` entry, an `ARCHITECTURE.md` "Current milestone" update plus a new
+"Verification claims" rule, and a new `verify` npm script in `package.json`.
+
+**Why:**
+- Option 3 would leave `master` broken indefinitely and repeats the exact failure mode this
+  milestone exists to close.
+- Option 1 (single commit) would bury an unrelated test-coverage change inside the
+  critical-fix commit's diff, making it harder for a future reviewer (or `git bisect`) to tell
+  "what fixed the broken build" from "what happened to be lying around at the same time" --
+  exactly the kind of silent absorption this milestone was chartered to avoid.
+- The fix itself required no new implementation -- it was already written, already
+  unit-tested (`src/__tests__/claude.test.ts`), and already proven against the real CookVideo
+  repository via real local `execute --execute` runs recorded in `EXECUTION_LOG.json`. This
+  milestone's job was recognizing that, and giving it the deliberate-decision record
+  `ARCHITECTURE.md`'s own closing line requires ("Do not expand scope beyond what a given
+  milestone explicitly approves without a deliberate decision recorded in
+  `.cookvideo/DECISIONS.md`"), which had never happened for this specific interface change.
+- A documented rule plus a single `npm run verify` script is proportionate: it closes the
+  actual gap (a verification claim describing a state nobody checked was actually committed)
+  without introducing a new category of tooling (git hooks, CI) this project has not yet
+  decided to adopt.
+
+**Known limitations:**
+- The `npm run verify` rule is enforced by discipline, not tooling -- nothing currently blocks
+  a commit or push if `git status` is dirty or `verify` was never actually run. A git hook or
+  CI check would close that; deliberately deferred as a bigger category of tooling change than
+  this milestone's scope.
+- This does not retroactively fix or annotate the `BUILD_LOG.md` entries for Milestones 6-8,
+  whose "verified" claims were true only of the working tree at the time, not of what was
+  pushed -- left as historical record rather than rewritten, consistent with `BUILD_LOG.md`
+  being an append-only chronological log.
+- Granular persistence for `REVIEW`/`APPROVAL_REQUIRED`/`COMMITTING`/`DEPLOYING`/`VERIFYING`
+  (named as a known limitation in Milestone 8's own decision above) remains unaddressed --
+  deliberately deferred to a future milestone, not folded in here.

@@ -125,9 +125,30 @@ and a submission that fails validation never touches `TASK_STATE.json` — see
 `src/lib/plan.ts`'s `runPlan` for the exact ordering (validate → check existing task →
 check replacement safety → write).
 
+## Verification claims
+
+A milestone's `.cookvideo/BUILD_LOG.md` entry may only report `npm run verify` (or the
+equivalent `npm run typecheck` / `npm run lint` / `npm test` run separately) results against a
+**clean `git status`** -- i.e. describing what is actually committed at `HEAD`, never a dirty
+working tree that hasn't been committed and pushed yet. This exists because Milestones 6-8's
+"Verified: npm run typecheck (clean)... npm test (all passing)" claims were true only of an
+uncommitted local working tree: the pushed `master` HEAD they were recorded against did not
+actually compile (see Milestone 9's `.cookvideo/DECISIONS.md` entry). When in doubt, verify
+against an isolated `git worktree` checkout of the commit in question, not the working
+directory the milestone was developed in.
+
 ## Current milestone
 
-**Milestone 8 (this one):** persistent execute lifecycle transitions. Previously, `execute`
+**Milestone 9 (this one):** restore build integrity and add the verification-claims rule
+above. Committed a Claude CLI invocation fix (`src/agents/claude.ts`) that had been fully
+written, tested, and live-verified against the real CookVideo repository but never actually
+committed -- `src/lib/execution.ts`/`src/commands/execute.ts` had already been committed
+against its new stdin-based interface, leaving the pushed `master` HEAD in a non-compiling
+state. Added `npm run verify` (`package.json`) and the rule above so a milestone's recorded
+verification claims can't silently diverge from what's actually pushed again. See
+`.cookvideo/DECISIONS.md` for the full account.
+
+**Milestone 8:** persistent execute lifecycle transitions. Previously, `execute`
 only *validated* that a move into `IMPLEMENTING` would be legal
 (`validateExecutionTransition`, `src/lib/execution.ts`) but never persisted it —
 `TASK_STATE.json` stayed frozen at whatever phase a task was already in no matter what

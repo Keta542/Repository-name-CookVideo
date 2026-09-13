@@ -18,7 +18,8 @@
     "approve": "npm run build --silent && node dist/cli.js approve",
     "reset": "npm run build --silent && node dist/cli.js reset",
     "execute": "npm run build --silent && node dist/cli.js execute",
-    "plan": "npm run build --silent && node dist/cli.js plan"
+    "plan": "npm run build --silent && node dist/cli.js plan",
+    "verify": "npm run typecheck && npm run lint && npm test"
   },
   "engines": {
     "node": ">=20"
