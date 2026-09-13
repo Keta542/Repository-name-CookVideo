@@ -5,6 +5,55 @@ top.
 
 ---
 
+## 2026-09-13 — Milestone 7: risk-based approval gate enforcement
+
+- Made the approval gate real. Previously, nothing ever forced a task into
+  `APPROVAL_REQUIRED`/`PENDING`, so `completeTask` (`src/lib/taskState.ts`) could move any
+  task straight to `COMPLETED` regardless of its declared `riskLevel` or
+  `approvalRequirements` -- a `HIGH`-risk task could complete with zero human approval ever
+  recorded.
+- Added `requiresApprovalGate(state)` (`src/lib/taskState.ts`): true when `riskLevel` is
+  `MEDIUM`/`HIGH`, or `approvalRequirements` is non-empty.
+- `completeTask` now checks this (after its existing `REJECTED`/`PENDING` refusals, which are
+  unchanged) and, for a qualifying task that isn't yet `APPROVED`, validates and applies the
+  sub-path from the task's current phase up to `APPROVAL_REQUIRED` using the exact same
+  per-hop `isValidTransition` check the full walk-to-`COMPLETED` already used -- no new
+  lifecycle phase or transition was added. The result: `phase: APPROVAL_REQUIRED`,
+  `approvalStatus: PENDING`, `ok: false`. A plain `LOW`/`NOT_REQUIRED` task (the Milestone 6
+  shape) is completely unaffected and still completes in one step.
+- Updated `src/commands/approve.ts` and `src/commands/complete.ts` to write
+  `TASK_STATE.json`, `ACTIVE_TASK.md`, and a `BUILD_LOG.md` entry -- using the same
+  `formatActiveTaskMarkdown`/`prependBuildLogEntry` helpers `plan`/`reset` already use --
+  instead of only `TASK_STATE.json` as before. Both commands decide whether to write by
+  checking `result.state !== state` (an existing reference-equality invariant every
+  refusal/no-op path in `approveTask`/`completeTask` already upheld), so a pure refusal or an
+  already-approved/-completed no-op never writes a duplicate entry. Both commands gained an
+  injectable path context (`ApproveContext`/`CompleteContext`, mirroring
+  `PlanContext`/`ExecuteContext`) so this can be tested against a temp directory; `cli.ts` is
+  unchanged (both default to the real configured paths).
+- Added `src/__tests__/approve.test.ts` and extended `src/__tests__/complete.test.ts` (7 new
+  tests) covering the TASK_STATE.json/ACTIVE_TASK.md/BUILD_LOG.md consistency behavior for
+  both commands, including the "no write on a pure refusal or no-op" case.
+- Extended `src/__tests__/taskState.test.ts` (14 new tests) covering: `requiresApprovalGate`
+  directly; a `MEDIUM`/`HIGH`-risk task refused while `PENDING`; a non-empty
+  `approvalRequirements` task refused while `PENDING`; a qualifying task completing once
+  `APPROVED`; the plain `LOW`/`NOT_REQUIRED` Milestone-6 shape still completing in one step
+  from every forward-path phase; a qualifying task being moved into
+  `APPROVAL_REQUIRED`/`PENDING` from `PLANNED`/`IMPLEMENTING`/`TESTING`/`REVIEW`, for both
+  `MEDIUM`/`HIGH` risk and non-empty `approvalRequirements`; an ordinary task never being
+  gated; the full gate -> `approve` -> `complete` round trip reaching `COMPLETED`; and
+  backward-compatible loading of a pre-Milestone-4-shaped `TASK_STATE.json` (missing
+  `requestedChanges`/`approvalRequirements`).
+- Updated `.cookvideo/APPROVAL_POLICY.md` with a new "Enforcement" section stating the exact
+  rule, `.cookvideo/ARCHITECTURE.md`'s "Current milestone" section, and
+  `.cookvideo/DECISIONS.md` with the decision to enforce the gate inside `completeTask`
+  (rather than `execute` or a new command) and why.
+- Did not modify CookVideo, add any Supabase/Vercel/Mux/GitHub integration, add commit/push/
+  deploy automation, or commit/push anything from this control plane. No existing lifecycle
+  transition, target-validation, or execution-verification behavior was weakened.
+- Verified: `npm run typecheck` (clean) and `npm test` (full suite, including all new tests,
+  passing alongside every Milestone 1-6 test).
+
 ## 2026-09-09 — Task planned via `cookvideo-agent plan`: EXAMPLE-UI-COPY-001
 
 - Objective: Update the empty-state copy on the CookVideo saved-recipes screen so it points people toward the Discover tab instead of just saying 'No recipes saved yet.'

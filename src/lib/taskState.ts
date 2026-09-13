@@ -309,3 +309,226 @@ export function approveTask(state: TaskState): ApproveResult {
 export function resetTaskState(): TaskState {
   return { ...EMPTY_TASK_STATE };
 }
+
+// ---------------------------------------------------------------------------
+// complete
+// ---------------------------------------------------------------------------
+
+// The canonical forward-only path from PLANNED to COMPLETED. No command in
+// this control plane currently writes TESTING/REVIEW/APPROVAL_REQUIRED/
+// COMMITTING/DEPLOYING/VERIFYING to disk -- `execute` only validates a move
+// into IMPLEMENTING without persisting it, and `approve` only handles the
+// single APPROVAL_REQUIRED -> APPROVED hop. So a task whose implementation
+// was actually carried out (via `execute`, verified by its file-change
+// check) and committed has nowhere left to record that fact. `completeTask`
+// closes that gap by validating the *entire* remaining walk to COMPLETED
+// against the existing TRANSITIONS table (the same table isValidTransition
+// already reads) -- it does not add any new transition, it only allows a
+// single call to validate and apply the sequence of existing ones at once.
+const FORWARD_PATH_TO_COMPLETION: readonly TaskPhase[] = [
+  "PLANNED",
+  "IMPLEMENTING",
+  "TESTING",
+  "REVIEW",
+  "APPROVAL_REQUIRED",
+  "APPROVED",
+  "COMMITTING",
+  "DEPLOYING",
+  "VERIFYING",
+  "COMPLETED",
+];
+
+// A task whose declared riskLevel is above LOW, or that carries any
+// planner-anticipated approvalRequirements, is exactly the kind of task
+// .cookvideo/APPROVAL_POLICY.md describes as needing a human sign-off before
+// it's done -- riskLevel MEDIUM/HIGH maps to "REQUIRES USER APPROVAL" /
+// "ALWAYS REQUIRES USER APPROVAL" actions, and a non-empty
+// approvalRequirements is the planner saying the same thing in its own
+// words. A plain LOW/NOT_REQUIRED task (e.g. the Milestone 6 UI-copy shape)
+// never triggers this.
+export function requiresApprovalGate(state: TaskState): boolean {
+  return state.riskLevel === "MEDIUM" || state.riskLevel === "HIGH" || state.approvalRequirements.length > 0;
+}
+
+// Index of APPROVAL_REQUIRED within the forward path -- used below to walk
+// only *part* of FORWARD_PATH_TO_COMPLETION (up to the gate) rather than all
+// the way to COMPLETED, without introducing any transition the TRANSITIONS
+// table doesn't already define.
+const APPROVAL_REQUIRED_INDEX = FORWARD_PATH_TO_COMPLETION.indexOf("APPROVAL_REQUIRED");
+
+export interface CompleteOptions {
+  // The CookVideo repository commit hash the human is vouching for as
+  // "this is the committed implementation this task's completion refers
+  // to." Purely descriptive -- completeTask never runs git itself and never
+  // verifies the hash against CookVideo, since this control plane must
+  // never write into, commit to, or otherwise touch that repository.
+  commitHash?: string;
+}
+
+export interface CompleteResult {
+  ok: boolean;
+  state: TaskState;
+  message: string;
+}
+
+// Moves a task all the way to COMPLETED in one step, the same load ->
+// validate -> (caller) save shape as approveTask. This command performs no
+// side effects of its own beyond the TaskState it returns: it never edits
+// CookVideo, never runs git commit/push, and never deploys anything -- it
+// only records that a task's already-committed implementation is done, and
+// optionally which CookVideo commit that was.
+export function completeTask(state: TaskState, options: CompleteOptions = {}): CompleteResult {
+  if (state.taskId === null) {
+    return {
+      ok: false,
+      state,
+      message: "No active task to complete. Run `cookvideo-agent task` to check current state.",
+    };
+  }
+
+  if (state.phase === "COMPLETED") {
+    return {
+      ok: true,
+      state,
+      message: `Task ${state.taskId} is already COMPLETED. No change made.`,
+    };
+  }
+
+  // A task a human explicitly rejected, or one awaiting a human decision
+  // that hasn't been made yet, must never be silently marked complete --
+  // this mirrors the same REJECTED stop sign checkApprovalForExecution
+  // enforces for `execute` (see src/lib/execution.ts).
+  if (state.approvalStatus === "REJECTED") {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId} has approvalStatus REJECTED and cannot be completed. ` +
+        "See .cookvideo/APPROVAL_POLICY.md.",
+    };
+  }
+  if (state.approvalStatus === "PENDING") {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId} has approvalStatus PENDING. Run \`cookvideo-agent approve\` ` +
+        "(or otherwise resolve the pending approval) before completing.",
+    };
+  }
+
+  const pathIndex = FORWARD_PATH_TO_COMPLETION.indexOf(state.phase);
+  if (pathIndex === -1) {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId} is in phase ${state.phase}, which is not on the forward path to ` +
+        "COMPLETED. Recover it to PLANNED or IMPLEMENTING first (see `cookvideo-agent plan` / " +
+        "`cookvideo-agent execute`), or CANCELLED tasks cannot be completed at all.",
+    };
+  }
+
+  // Risk/approval gate enforcement (Milestone 7). By this point
+  // approvalStatus is either NOT_REQUIRED or APPROVED -- REJECTED and
+  // PENDING were already refused above. A task that requiresApprovalGate
+  // (riskLevel MEDIUM/HIGH, or a non-empty approvalRequirements) must not be
+  // allowed to skip straight to COMPLETED just because nothing has ever
+  // asked for its approval yet -- that would make the gate purely
+  // decorative. If such a task isn't APPROVED, this drives it (using the
+  // exact same isValidTransition machinery every other hop in this function
+  // already relies on -- no parallel state machine) as far as
+  // APPROVAL_REQUIRED/PENDING and stops there; a human must run
+  // `cookvideo-agent approve` before completion can proceed.
+  if (state.approvalStatus !== "APPROVED" && requiresApprovalGate(state)) {
+    const riskDescription =
+      `riskLevel: ${state.riskLevel ?? "not set"}` +
+      (state.approvalRequirements.length > 0
+        ? `, approvalRequirements: ${state.approvalRequirements.join(", ")}`
+        : "");
+
+    if (pathIndex >= APPROVAL_REQUIRED_INDEX) {
+      // Already at or past the gate phase without ever being approved -- an
+      // inconsistent combination no command in this control plane produces
+      // on its own (APPROVED phase is only ever set alongside approvalStatus
+      // APPROVED by approveTask), but still refused defensively rather than
+      // silently completed.
+      return {
+        ok: false,
+        state,
+        message:
+          `Task ${state.taskId} requires human approval (${riskDescription}) and has not been ` +
+          "approved. Run `cookvideo-agent approve` if the task is in phase APPROVAL_REQUIRED, or " +
+          "otherwise resolve this before completing. See .cookvideo/APPROVAL_POLICY.md.",
+      };
+    }
+
+    for (let i = pathIndex; i < APPROVAL_REQUIRED_INDEX; i++) {
+      const from = FORWARD_PATH_TO_COMPLETION[i];
+      const to = FORWARD_PATH_TO_COMPLETION[i + 1];
+      if (from === undefined || to === undefined || !isValidTransition(from, to)) {
+        return {
+          ok: false,
+          state,
+          message: `Task ${state.taskId} cannot reach APPROVAL_REQUIRED: ${from} -> ${to} is not a valid transition.`,
+        };
+      }
+    }
+
+    const gatedState: TaskState = {
+      ...state,
+      phase: "APPROVAL_REQUIRED",
+      approvalStatus: "PENDING",
+      updatedAt: new Date().toISOString(),
+    };
+
+    return {
+      ok: false,
+      state: gatedState,
+      message:
+        `Task ${state.taskId} requires human approval before it can complete (${riskDescription}). ` +
+        `Moved ${state.phase} -> APPROVAL_REQUIRED (approvalStatus: PENDING). Run ` +
+        "`cookvideo-agent approve` once reviewed, then re-run `cookvideo-agent complete`. " +
+        "See .cookvideo/APPROVAL_POLICY.md.",
+    };
+  }
+
+  // Validate every remaining hop against the existing transition table --
+  // this is the same isValidTransition every other lifecycle check in this
+  // file and in src/lib/execution.ts already uses, just walked across more
+  // than one step. If TRANSITIONS is ever changed to no longer allow one of
+  // these hops, completion correctly stops being possible too, rather than
+  // silently drifting from the rest of the lifecycle engine.
+  for (let i = pathIndex; i < FORWARD_PATH_TO_COMPLETION.length - 1; i++) {
+    const from = FORWARD_PATH_TO_COMPLETION[i];
+    const to = FORWARD_PATH_TO_COMPLETION[i + 1];
+    if (from === undefined || to === undefined || !isValidTransition(from, to)) {
+      return {
+        ok: false,
+        state,
+        message: `Task ${state.taskId} cannot reach COMPLETED: ${from} -> ${to} is not a valid transition.`,
+      };
+    }
+  }
+
+  const result =
+    options.commitHash && options.commitHash.trim().length > 0
+      ? `Completed. CookVideo commit: ${options.commitHash.trim()}`
+      : "Completed.";
+
+  const nextState: TaskState = {
+    ...state,
+    phase: "COMPLETED",
+    result,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return {
+    ok: true,
+    state: nextState,
+    message:
+      `Task ${state.taskId} completed (${state.phase} -> COMPLETED). ` +
+      "No files were edited, and no commit, push, or deployment was performed by this command -- " +
+      "it only records that already-committed work is done.",
+  };
+}

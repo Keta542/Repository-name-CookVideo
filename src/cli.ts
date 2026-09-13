@@ -3,6 +3,7 @@ import { formatInspectReport, runInspect } from "./commands/inspect.js";
 import { formatStatusReport, runStatus } from "./commands/status.js";
 import { formatTaskReport, runTask } from "./commands/task.js";
 import { runApprove } from "./commands/approve.js";
+import { parseCompleteCliArgs, runComplete } from "./commands/complete.js";
 import { runReset } from "./commands/reset.js";
 import { formatExecuteReport, runExecuteCommand } from "./commands/execute.js";
 import { formatPlanReport, runPlanCommand } from "./commands/plan.js";
@@ -14,6 +15,13 @@ Usage:
   cookvideo-agent status    Print a concise summary of the current engineering state
   cookvideo-agent task      Show the current task's lifecycle phase, risk and approval status
   cookvideo-agent approve   Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
+  cookvideo-agent complete [--commit <hash>]
+                            Move a task's remaining lifecycle phases through to COMPLETED, only
+                            when every remaining transition is valid per the lifecycle rules
+                            (refuses from FAILED/BLOCKED/CANCELLED, and from approvalStatus
+                            PENDING/REJECTED). Optionally records the CookVideo commit hash the
+                            implementation was committed as. Never edits CookVideo, invokes
+                            Claude, or runs git commit/push/deploy.
   cookvideo-agent reset     Reset task state to empty (does not delete source or repo files)
   cookvideo-agent execute [--execute] [--target <name>]
                             Prepare (and, only in local execution mode with --execute, run)
@@ -51,6 +59,11 @@ async function main(argv: string[]): Promise<number> {
     }
     case "approve": {
       const result = runApprove();
+      console.log(result.message);
+      return result.ok ? 0 : 1;
+    }
+    case "complete": {
+      const result = runComplete(parseCompleteCliArgs(argv.slice(3)));
       console.log(result.message);
       return result.ok ? 0 : 1;
     }

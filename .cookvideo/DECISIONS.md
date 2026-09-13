@@ -139,3 +139,76 @@ execute` (`formatExecuteReport`) renders this distinctly from the normal dry-run
   behavior of the other pre-brief refusals: no active task, invalid lifecycle transition,
   REJECTED approval). If auditing every mismatch attempt becomes important, this would need
   revisiting.
+
+---
+
+## 2026-09-13 — Enforce the risk/approval gate in `completeTask`, not `execute` (Milestone 7)
+
+**Problem:** `.cookvideo/APPROVAL_POLICY.md` and the task lifecycle both describe an
+`APPROVAL_REQUIRED` → `APPROVED` gate for risk-bearing work, but nothing in the code ever
+*required* a task to pass through it. `completeTask` (`src/lib/taskState.ts`) only refused
+completion when `approvalStatus` was already `REJECTED` or `PENDING` -- it never looked at
+`riskLevel` or `approvalRequirements`, and no command ever set a task's phase to
+`APPROVAL_REQUIRED` in the first place. In practice this meant a `HIGH`-risk task could reach
+`COMPLETED` with zero human approval ever recorded, as long as nobody had manually put it into
+`PENDING`. This had not yet caused a real incident only because every task run through this
+control plane so far (Milestones 4-6) has been `riskLevel: LOW`.
+
+**Options considered:**
+1. Have `cookvideo-agent execute` (`src/lib/execution.ts`) persist a phase transition into
+   `APPROVAL_REQUIRED`/`PENDING` once implementation succeeds, for qualifying tasks.
+2. Add a new, separate CLI command (e.g. `cookvideo-agent gate` or `request-approval`) that a
+   human or ChatGPT would have to remember to run before `complete`.
+3. Enforce the gate inside `completeTask` itself: refuse completion for a qualifying,
+   unapproved task, and -- reusing the exact walk-to-`COMPLETED` logic `completeTask` already
+   performs against `FORWARD_PATH_TO_COMPLETION`/`isValidTransition` -- stop that walk early,
+   at `APPROVAL_REQUIRED`, persisting `approvalStatus: PENDING` there instead of silently
+   refusing with no state change.
+
+**Decision:** Option 3. `requiresApprovalGate(state)` (`src/lib/taskState.ts`) is true when
+`riskLevel` is `MEDIUM`/`HIGH` or `approvalRequirements` is non-empty. `completeTask` checks
+this (after its existing `REJECTED`/`PENDING` refusals, so those keep their current behavior
+unchanged) and, for a qualifying task that isn't yet `APPROVED`, validates and applies the
+sub-path from the task's current phase up to (not including) `APPROVAL_REQUIRED` using the
+same per-hop `isValidTransition` check the full walk already uses, then returns a new state
+with `phase: "APPROVAL_REQUIRED"`, `approvalStatus: "PENDING"` -- and `ok: false`, since the
+task did not reach `COMPLETED`. `cookvideo-agent approve` then works exactly as before to move
+it to `APPROVED`, after which re-running `complete` finishes the remaining hops normally.
+
+**Why:**
+- Reuses 100% of the existing transition machinery (`FORWARD_PATH_TO_COMPLETION`,
+  `isValidTransition`) -- no parallel/duplicate state machine, and no new lifecycle phase or
+  transition was added to `src/lib/taskState.ts`'s `TRANSITIONS` table.
+- `execute` (option 1) deliberately does not yet persist *any* phase transition to
+  `TASK_STATE.json` -- see its own existing comments in `src/lib/execution.ts` and
+  `completeTask`'s docstring -- extending its persistence responsibilities was a larger,
+  separate change than "make the approval gate real," and out of scope for this milestone's
+  constraints.
+- A brand-new command (option 2) would be one more step a human or the planner has to
+  remember to invoke correctly; making `complete` itself the trigger means the gate is
+  enforced at the one moment that actually matters -- immediately before a task would
+  otherwise reach `COMPLETED` -- regardless of what phase it happened to be sitting in
+  beforehand (in practice, almost always `PLANNED`, since nothing else persists intermediate
+  phases yet).
+- `cookvideo-agent approve` and `cookvideo-agent complete` were also updated to write
+  `TASK_STATE.json`, `ACTIVE_TASK.md`, and a `BUILD_LOG.md` entry using the exact same
+  `formatActiveTaskMarkdown`/`prependBuildLogEntry` helpers `plan`/`reset` already use
+  (previously only `TASK_STATE.json` was updated by these two commands) -- both commands
+  decide whether to persist by checking `result.state !== state` (a reference-equality
+  invariant every refusal path in `approveTask`/`completeTask` already upheld, and already
+  relied on by this test suite), so a pure refusal or an already-approved/-completed no-op
+  never writes a duplicate `BUILD_LOG.md` entry.
+
+**Known limitations:**
+- `riskLevel`/`approvalRequirements` are set once, by the planner, at `plan` time, and never
+  re-evaluated afterward -- if a task's actual risk changes mid-flight (e.g. its scope grows
+  during implementation), nothing currently re-derives or updates them.
+- The gate is enforced only at `complete` time. A task can still sit indefinitely in
+  `PLANNED`/`IMPLEMENTING`/etc. without ever being routed to a human for early review --
+  `complete` being the enforcement point means the gate is only visible when someone actually
+  tries to finish the task, not proactively.
+- The defensive fallback for a task already at or past `APPROVAL_REQUIRED` in phase but not
+  `APPROVED` in status (a combination no command in this control plane produces on its own)
+  refuses without moving the phase further, since the lifecycle has no transition backwards
+  into `APPROVAL_REQUIRED` -- this is untested against real usage since it is currently
+  unreachable, only defensive.

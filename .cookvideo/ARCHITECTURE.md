@@ -112,7 +112,24 @@ check replacement safety → write).
 
 ## Current milestone
 
-**Milestone 4 (this one):** the planner → task creation interface. A deterministic JSON
+**Milestone 7 (this one):** risk-based approval gate enforcement. Previously, nothing ever
+forced a task into `APPROVAL_REQUIRED`/`PENDING`, so `completeTask` (`src/lib/taskState.ts`)
+could move any task straight to `COMPLETED` regardless of its declared `riskLevel` or
+`approvalRequirements` — the approval gate existed in the data model but was never actually
+enforced. `completeTask` is now risk/approval aware: a `MEDIUM`/`HIGH`-risk task, or one with
+any non-empty `approvalRequirements`, is refused unless `approvalStatus` is `APPROVED`; if it
+isn't, `complete` itself drives the task as far as `APPROVAL_REQUIRED`/`PENDING` (reusing the
+existing `isValidTransition`/`FORWARD_PATH_TO_COMPLETION` machinery, not a new state machine)
+and stops there, requiring `cookvideo-agent approve` before a subsequent `complete` can reach
+`COMPLETED`. A plain `LOW`/`NOT_REQUIRED` task (the Milestone 6 shape) is unaffected and still
+completes in one step. `cookvideo-agent approve` and `cookvideo-agent complete` now both write
+`TASK_STATE.json`, `ACTIVE_TASK.md`, and a `BUILD_LOG.md` entry via the same helpers `plan`/
+`reset` already use (`formatActiveTaskMarkdown`/`prependBuildLogEntry` in `src/lib/plan.ts`),
+closing a gap where those two commands previously only updated `TASK_STATE.json`. See
+`.cookvideo/APPROVAL_POLICY.md` for the enforced rule and `.cookvideo/DECISIONS.md` for why
+`completeTask` (rather than `execute`) was chosen as the enforcement point.
+
+**Milestone 4:** the planner → task creation interface. A deterministic JSON
 handoff boundary (`src/lib/taskInput.ts`) an external planner (ChatGPT) submits through
 `cookvideo-agent plan`, which validates it, protects any existing active task (refusing
 replacement without `--replace`, and refusing `--replace` itself while that task is
