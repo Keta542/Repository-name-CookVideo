@@ -4,6 +4,7 @@ import { formatStatusReport, runStatus } from "./commands/status.js";
 import { formatTaskReport, runTask } from "./commands/task.js";
 import { runApprove } from "./commands/approve.js";
 import { parseCompleteCliArgs, runComplete } from "./commands/complete.js";
+import { ADVANCE_TARGET_PHASES_HELP, parseAdvanceCliArgs, runAdvance } from "./commands/advance.js";
 import { runReset } from "./commands/reset.js";
 import { formatExecuteReport, runExecuteCommand } from "./commands/execute.js";
 import { formatPlanReport, runPlanCommand } from "./commands/plan.js";
@@ -15,6 +16,14 @@ Usage:
   cookvideo-agent status    Print a concise summary of the current engineering state
   cookvideo-agent task      Show the current task's lifecycle phase, risk and approval status
   cookvideo-agent approve   Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
+  cookvideo-agent advance --to <${ADVANCE_TARGET_PHASES_HELP}> [--note <text>]
+                            Record a single real-world lifecycle step: TESTING->REVIEW,
+                            REVIEW->APPROVAL_REQUIRED, APPROVED->COMMITTING,
+                            COMMITTING->DEPLOYING, or DEPLOYING->VERIFYING. Refuses unless the
+                            task is already in the exact required source phase. --note is
+                            free-text, purely descriptive (e.g. a commit hash or deploy ID) and
+                            never verified. Never edits CookVideo or runs git commit/push/deploy
+                            -- it only records that a human says the step happened.
   cookvideo-agent complete [--commit <hash>]
                             Move a task's remaining lifecycle phases through to COMPLETED, only
                             when every remaining transition is valid per the lifecycle rules
@@ -59,6 +68,25 @@ async function main(argv: string[]): Promise<number> {
     }
     case "approve": {
       const result = runApprove();
+      console.log(result.message);
+      return result.ok ? 0 : 1;
+    }
+    case "advance": {
+      const parsed = parseAdvanceCliArgs(argv.slice(3));
+      if (parsed.invalidToValue !== null) {
+        console.error(
+          `cookvideo-agent advance: "${parsed.invalidToValue}" is not a valid --to target. ` +
+            `Expected one of: ${ADVANCE_TARGET_PHASES_HELP}.\n`,
+        );
+        console.error(USAGE);
+        return 1;
+      }
+      if (parsed.toPhase === null) {
+        console.error("cookvideo-agent advance: --to <phase> is required.\n");
+        console.error(USAGE);
+        return 1;
+      }
+      const result = runAdvance(parsed.toPhase, parsed.options);
       console.log(result.message);
       return result.ok ? 0 : 1;
     }

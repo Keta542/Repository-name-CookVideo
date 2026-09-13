@@ -360,3 +360,81 @@ fix.
 - Granular persistence for `REVIEW`/`APPROVAL_REQUIRED`/`COMMITTING`/`DEPLOYING`/`VERIFYING`
   (named as a known limitation in Milestone 8's own decision above) remains unaddressed --
   deliberately deferred to a future milestone, not folded in here.
+
+---
+
+## 2026-09-13 — Add granular single-hop lifecycle tracking via `advance` (Milestone 10)
+
+**Problem:** `completeTask` (`src/lib/taskState.ts`) remains the only way past `TESTING` --
+it validates and applies the *entire* remaining walk to `COMPLETED` in one call, including
+`COMMITTING` and `DEPLOYING`, exactly the two phases `.cookvideo/APPROVAL_POLICY.md`'s
+"REQUIRES USER APPROVAL" list is about (git commit, git push, production deploys). Nothing
+records, individually and with a timestamp, that each of those real actions actually
+happened -- one `complete` call (optionally with a `--commit <hash>`) produces one bulk
+`BUILD_LOG.md` entry ("Completed"), not a record of when review happened, when the commit
+happened, when the deploy happened, and when it was verified. This was named as a known
+limitation in both Milestone 7's and Milestone 8's own decision entries above and deliberately
+deferred each time.
+
+**Options considered:**
+1. Change `completeTask` itself to stop and persist at each intermediate phase rather than
+   walking the whole remaining path in one call.
+2. Add a brand-new command per phase (`review`, `commit-record`, `deploy-record`,
+   `verify-record`).
+3. Add one new, narrow command -- `cookvideo-agent advance --to <phase> [--note <text>]` --
+   restricted to exactly the five single hops between `TESTING` and `VERIFYING`
+   (`TESTING`→`REVIEW`→`APPROVAL_REQUIRED`, `APPROVED`→`COMMITTING`→`DEPLOYING`→`VERIFYING`),
+   leaving `completeTask` completely unchanged as a still-valid one-call shortcut.
+
+**Decision:** Option 3. Added `advanceTaskPhase` (`src/lib/taskState.ts`) and
+`cookvideo-agent advance` (`src/commands/advance.ts`). `advance`'s legal target set
+(`ADVANCEABLE_TARGET_PHASES`) is a closed, five-member allowlist, each mapped to the exact
+single source phase it requires (`ADVANCE_SOURCE_PHASE`) -- not the full `TRANSITIONS`
+adjacency, which would also let it claim `IMPLEMENTING` (`execute`'s job),
+`APPROVAL_REQUIRED`→`APPROVED` (`approve`'s job), or →`COMPLETED` (`complete`'s job).
+`isValidTransition` against the shared `TRANSITIONS` table is still checked defensively
+underneath, so `advance` can never move a task somewhere the rest of the lifecycle engine
+disagrees with. An optional `--note` is stored verbatim (trimmed) in `result`, exactly like
+`completeTask`'s existing `commitHash` option -- free-text, purely descriptive, never verified
+against git or any external system. Two specific behaviors were decided explicitly (see
+below): `advance` leaves `approvalStatus` untouched even when landing on `APPROVAL_REQUIRED`
+for a task that doesn't require the gate, and `--note` is accepted uniformly at all five hops
+rather than restricted to `COMMITTING`/`DEPLOYING`.
+
+**Why:**
+- Option 1 would have meant changing `completeTask`'s existing, already-tested behavior
+  (Milestones 6-7), risking the exact regression this project's "preserve the existing safety
+  model" principle exists to prevent -- and would remove the one-call convenience that's
+  correct and sufficient for the common `LOW`-risk case.
+- Option 2 (one command per phase) would have meant four new commands doing near-identical
+  work (validate one hop, write three documents) instead of one parameterized command reusing
+  a single code path -- more surface area for the same capability.
+- Restricting `advance`'s target set below what `TRANSITIONS` itself allows (rather than
+  exposing every transition generically) keeps each existing command's ownership of its own
+  phases intact: `execute` alone decides when a task is genuinely `IMPLEMENTING`/`TESTING`
+  (it has real postcondition verification behind those transitions -- see Milestone 8);
+  `approve` alone decides `APPROVED` (the actual approval-gate flip); `complete` alone decides
+  `COMPLETED`. `advance` only ever fills the previously-empty middle.
+- Leaving `approvalStatus` untouched when `advance` lands on `APPROVAL_REQUIRED` keeps
+  `requiresApprovalGate`/`completeTask` (Milestone 7) as the single place that decides whether
+  a task genuinely needs a human's sign-off -- a human recording "this was reviewed" for their
+  own audit trail must never, by itself, manufacture an approval requirement that didn't
+  already exist per the task's own `riskLevel`/`approvalRequirements`.
+- Accepting `--note` uniformly (rather than only at `COMMITTING`/`DEPLOYING`) keeps the
+  command's surface simpler -- one option, always available -- and a reviewer may reasonably
+  want to leave a note at `REVIEW` or `VERIFYING` too, not only where a commit hash or deploy
+  ID exists.
+
+**Known limitations:**
+- `advance` still performs no verification of its own -- a `--note` claiming a commit
+  happened is exactly as unverified as `completeTask`'s existing `commitHash` option always
+  was; this milestone does not change that trust model, only makes it possible to record more
+  of it, more often.
+- `README.md`'s "Current milestone" section had fallen behind (still describing Milestone 4)
+  while `ARCHITECTURE.md`/`DECISIONS.md`/`BUILD_LOG.md` stayed current through Milestones 5-9;
+  this milestone updates `README.md`'s "Current milestone" entry and adds `advance`'s own
+  documentation, but does not retroactively backfill individual Milestone 5-9 sections there --
+  left as a known gap, not silently absorbed into this milestone's scope.
+- Performing the actual commit/push/deploy action remains entirely out of scope, exactly as
+  `.cookvideo/APPROVAL_POLICY.md` already states -- `advance` only ever records that a human
+  says a step happened.

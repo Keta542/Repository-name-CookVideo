@@ -4,11 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
+  ADVANCEABLE_TARGET_PHASES,
   EMPTY_TASK_STATE,
+  advanceTaskPhase,
   applyExecutionOutcome,
   approveTask,
   beginImplementing,
   completeTask,
+  isAdvanceableTargetPhase,
   isValidTaskState,
   isValidTransition,
   isTerminalPhase,
@@ -16,6 +19,7 @@ import {
   requiresApprovalGate,
   resetTaskState,
   saveTaskState,
+  type AdvanceableTargetPhase,
   type TaskState,
 } from "../lib/taskState.js";
 
@@ -525,4 +529,81 @@ test("applyExecutionOutcome refuses a phase where the target transition isn't le
   const result = applyExecutionOutcome(task, true, "irrelevant");
   assert.equal(result.ok, false);
   assert.equal(result.state, task);
+});
+
+// ---------------------------------------------------------------------------
+// advanceTaskPhase (Milestone 10)
+// ---------------------------------------------------------------------------
+
+test("advanceTaskPhase moves each of the five allowed single hops", () => {
+  const hops: Array<[TaskState["phase"], AdvanceableTargetPhase]> = [
+    ["TESTING", "REVIEW"],
+    ["REVIEW", "APPROVAL_REQUIRED"],
+    ["APPROVED", "COMMITTING"],
+    ["COMMITTING", "DEPLOYING"],
+    ["DEPLOYING", "VERIFYING"],
+  ];
+  for (const [from, to] of hops) {
+    const task = activeTask({ phase: from, approvalStatus: "NOT_REQUIRED" });
+    const result = advanceTaskPhase(task, to);
+    assert.equal(result.ok, true, `${from} -> ${to}`);
+    assert.equal(result.state.phase, to, `${from} -> ${to}`);
+  }
+});
+
+test("advanceTaskPhase records a note (trimmed) in result when supplied", () => {
+  const task = activeTask({ phase: "COMMITTING" });
+  const result = advanceTaskPhase(task, "DEPLOYING", { note: "  CookVideo commit c8b7df8  " });
+  assert.equal(result.ok, true);
+  assert.equal(result.state.result, "CookVideo commit c8b7df8");
+  assert.match(result.message, /Note: CookVideo commit c8b7df8/);
+});
+
+test("advanceTaskPhase leaves result untouched when no note is supplied", () => {
+  const task = activeTask({ phase: "COMMITTING", result: "previous note" });
+  const result = advanceTaskPhase(task, "DEPLOYING");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.result, "previous note");
+});
+
+test("advanceTaskPhase leaves approvalStatus untouched, even when landing on APPROVAL_REQUIRED for an ungated task", () => {
+  const task = activeTask({ phase: "REVIEW", riskLevel: "LOW", approvalRequirements: [], approvalStatus: "NOT_REQUIRED" });
+  const result = advanceTaskPhase(task, "APPROVAL_REQUIRED");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "APPROVAL_REQUIRED");
+  assert.equal(result.state.approvalStatus, "NOT_REQUIRED");
+});
+
+test("advanceTaskPhase refuses when the task is not in the exact required source phase", () => {
+  const task = activeTask({ phase: "PLANNED" });
+  const result = advanceTaskPhase(task, "REVIEW");
+  assert.equal(result.ok, false);
+  assert.equal(result.state, task);
+  assert.match(result.message, /requires it to already be in TESTING/);
+});
+
+test("advanceTaskPhase refuses when there is no active task", () => {
+  const task = activeTask({ taskId: null, phase: "TESTING" });
+  const result = advanceTaskPhase(task, "REVIEW");
+  assert.equal(result.ok, false);
+  assert.equal(result.state, task);
+  assert.match(result.message, /No active task/);
+});
+
+test("advanceTaskPhase refuses targets reserved for execute/approve/complete, even though TRANSITIONS allows them", () => {
+  // IMPLEMENTING belongs to execute (beginImplementing); APPROVED belongs to
+  // approve (approveTask); COMPLETED belongs to complete (completeTask).
+  // isAdvanceableTargetPhase must reject all three as --to values, and
+  // advanceTaskPhase's type signature only accepts AdvanceableTargetPhase in
+  // the first place -- this test guards the runtime type guard specifically.
+  assert.equal(isAdvanceableTargetPhase("IMPLEMENTING"), false);
+  assert.equal(isAdvanceableTargetPhase("APPROVED"), false);
+  assert.equal(isAdvanceableTargetPhase("COMPLETED"), false);
+  assert.equal(isAdvanceableTargetPhase("PLANNED"), false);
+});
+
+test("isAdvanceableTargetPhase accepts exactly the five advanceable target phases", () => {
+  for (const phase of ADVANCEABLE_TARGET_PHASES) {
+    assert.equal(isAdvanceableTargetPhase(phase), true, phase);
+  }
 });

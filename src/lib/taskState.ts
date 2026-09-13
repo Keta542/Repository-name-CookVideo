@@ -404,6 +404,129 @@ export function applyExecutionOutcome(
 }
 
 // ---------------------------------------------------------------------------
+// advance (granular single-hop phase tracking -- Milestone 10)
+//
+// Before this, `completeTask` was the only way past TESTING: it validates
+// and applies the entire remaining walk to COMPLETED in one call, including
+// COMMITTING and DEPLOYING -- exactly the two phases APPROVAL_POLICY.md's
+// "REQUIRES USER APPROVAL" list is about (git commit, git push, production
+// deploys) -- with no individual, timestamped record of when each of those
+// real-world actions actually happened. `advanceTaskPhase` lets a human
+// record each one as its own hop, entirely additive: it never changes what
+// `completeTask` does, and a task can still be completed in a single call
+// exactly as it always could (see .cookvideo/APPROVAL_POLICY.md).
+// ---------------------------------------------------------------------------
+
+// The exact, closed set of single hops `advance` is allowed to make -- never
+// the full TRANSITIONS adjacency (which would also let it claim IMPLEMENTING,
+// APPROVED, or COMPLETED, each of which belongs exclusively to `execute`,
+// `approve`, or `complete`). Expressed as "this target phase requires this
+// exact source phase" so there is exactly one legal hop per listed target,
+// never a skip-ahead.
+export const ADVANCEABLE_TARGET_PHASES = [
+  "REVIEW",
+  "APPROVAL_REQUIRED",
+  "COMMITTING",
+  "DEPLOYING",
+  "VERIFYING",
+] as const;
+export type AdvanceableTargetPhase = (typeof ADVANCEABLE_TARGET_PHASES)[number];
+
+const ADVANCE_SOURCE_PHASE: Record<AdvanceableTargetPhase, TaskPhase> = {
+  REVIEW: "TESTING",
+  APPROVAL_REQUIRED: "REVIEW",
+  COMMITTING: "APPROVED",
+  DEPLOYING: "COMMITTING",
+  VERIFYING: "DEPLOYING",
+};
+
+export function isAdvanceableTargetPhase(value: string): value is AdvanceableTargetPhase {
+  return (ADVANCEABLE_TARGET_PHASES as readonly string[]).includes(value);
+}
+
+export interface AdvanceOptions {
+  // Free-text, purely descriptive -- exactly like completeTask's commitHash,
+  // this is never verified against git or any external system. Stored
+  // verbatim (trimmed) in `result`, the same field completeTask/
+  // applyExecutionOutcome already use to record their own outcome messages.
+  note?: string;
+}
+
+export interface AdvanceResult {
+  ok: boolean;
+  state: TaskState;
+  message: string;
+}
+
+// Moves a task exactly one hop along the narrow REVIEW/APPROVAL_REQUIRED/
+// COMMITTING/DEPLOYING/VERIFYING seam. Unlike beginImplementing (which
+// no-ops when already at the target phase), a repeated call with the same
+// target on a task that has already moved past its required source phase is
+// refused, not treated as idempotent -- "advance to REVIEW" only ever means
+// "this task is at TESTING right now", not "get it to REVIEW somehow".
+//
+// Deliberately does not touch approvalStatus: whether a task actually needs
+// human sign-off is entirely `requiresApprovalGate`/`completeTask`'s call
+// (Milestone 7) -- a task can be walked into APPROVAL_REQUIRED here purely
+// for its own audit trail without that alone ever creating an approval
+// requirement that didn't already exist.
+export function advanceTaskPhase(
+  state: TaskState,
+  toPhase: AdvanceableTargetPhase,
+  options: AdvanceOptions = {},
+): AdvanceResult {
+  if (state.taskId === null) {
+    return {
+      ok: false,
+      state,
+      message: "No active task to advance. Run `cookvideo-agent task` to check current state.",
+    };
+  }
+
+  const requiredSourcePhase = ADVANCE_SOURCE_PHASE[toPhase];
+  if (state.phase !== requiredSourcePhase) {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId} is in phase ${state.phase}, but advancing to ${toPhase} requires it to ` +
+        `already be in ${requiredSourcePhase}. \`cookvideo-agent advance\` only supports the single hops ` +
+        "TESTING -> REVIEW, REVIEW -> APPROVAL_REQUIRED, APPROVED -> COMMITTING, COMMITTING -> DEPLOYING, " +
+        "and DEPLOYING -> VERIFYING -- every other transition belongs to `execute`, `approve`, or `complete`.",
+    };
+  }
+
+  // Defensive, not expected to ever differ from the check above: reuses the
+  // same TRANSITIONS table every other lifecycle check in this file already
+  // reads, rather than trusting ADVANCE_SOURCE_PHASE alone to be correct.
+  if (!isValidTransition(state.phase, toPhase)) {
+    return {
+      ok: false,
+      state,
+      message: `Task ${state.taskId} cannot move ${state.phase} -> ${toPhase}: not a valid lifecycle transition.`,
+    };
+  }
+
+  const note = options.note?.trim();
+  const previousPhase = state.phase;
+  const nextState: TaskState = {
+    ...state,
+    phase: toPhase,
+    result: note && note.length > 0 ? note : state.result,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return {
+    ok: true,
+    state: nextState,
+    message:
+      `Task ${state.taskId} advanced ${previousPhase} -> ${toPhase}.` +
+      (note && note.length > 0 ? ` Note: ${note}` : "") +
+      " No commit, push, or deployment was performed by this command -- it only records that this step happened.",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // complete
 // ---------------------------------------------------------------------------
 

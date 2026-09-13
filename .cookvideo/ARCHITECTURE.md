@@ -139,14 +139,39 @@ directory the milestone was developed in.
 
 ## Current milestone
 
-**Milestone 9 (this one):** restore build integrity and add the verification-claims rule
-above. Committed a Claude CLI invocation fix (`src/agents/claude.ts`) that had been fully
-written, tested, and live-verified against the real CookVideo repository but never actually
-committed -- `src/lib/execution.ts`/`src/commands/execute.ts` had already been committed
-against its new stdin-based interface, leaving the pushed `master` HEAD in a non-compiling
-state. Added `npm run verify` (`package.json`) and the rule above so a milestone's recorded
-verification claims can't silently diverge from what's actually pushed again. See
-`.cookvideo/DECISIONS.md` for the full account.
+**Milestone 10 (this one):** granular, single-hop lifecycle tracking. Previously,
+`completeTask` was the only way past `TESTING` -- it validates and applies the *entire*
+remaining walk to `COMPLETED` in one call, including `COMMITTING` and `DEPLOYING`, exactly
+the two phases `.cookvideo/APPROVAL_POLICY.md`'s "REQUIRES USER APPROVAL" list is about (git
+commit, git push, production deploys) -- with no individual, timestamped record of when each
+of those real-world actions actually happened. Added `advanceTaskPhase`
+(`src/lib/taskState.ts`) and `cookvideo-agent advance --to <phase> [--note <text>]`
+(`src/commands/advance.ts`), restricted to exactly five single hops --
+`TESTING`→`REVIEW`→`APPROVAL_REQUIRED` and `APPROVED`→`COMMITTING`→`DEPLOYING`→`VERIFYING` --
+reusing the same `TRANSITIONS` table every other lifecycle check already reads (no new phase
+or transition). `IMPLEMENTING`/`TESTING` remain exclusively `execute`'s territory,
+`APPROVAL_REQUIRED`→`APPROVED` remains exclusively `approve`'s, and →`COMPLETED` remains
+exclusively `complete`'s -- `advance` refuses all three even though `TRANSITIONS` itself would
+technically permit them. `--note` is optional, free-text, and purely descriptive (stored
+verbatim, trimmed, in `result`), exactly like `completeTask`'s existing `commitHash` option --
+never verified against git or any external system. `advance` deliberately never touches
+`approvalStatus`, even when landing on `APPROVAL_REQUIRED` for a task that doesn't actually
+require approval (`requiresApprovalGate` false) -- that stays exclusively `completeTask`'s
+call (Milestone 7). Each hop writes `TASK_STATE.json`, `ACTIVE_TASK.md`, and its own
+`BUILD_LOG.md` entry together, via the same `formatActiveTaskMarkdown`/`prependBuildLogEntry`
+helpers every other mutating command already uses. `completeTask` itself is completely
+unchanged -- it remains a valid single-call path for the common LOW-risk case and for any
+task whose granular history nobody needs recorded. See `.cookvideo/DECISIONS.md` for the full
+rationale and the two judgment calls it records.
+
+**Milestone 9:** restore build integrity and add the verification-claims rule above.
+Committed a Claude CLI invocation fix (`src/agents/claude.ts`) that had been fully written,
+tested, and live-verified against the real CookVideo repository but never actually committed
+-- `src/lib/execution.ts`/`src/commands/execute.ts` had already been committed against its
+new stdin-based interface, leaving the pushed `master` HEAD in a non-compiling state. Added
+`npm run verify` (`package.json`) and the rule above so a milestone's recorded verification
+claims can't silently diverge from what's actually pushed again. See `.cookvideo/DECISIONS.md`
+for the full account.
 
 **Milestone 8:** persistent execute lifecycle transitions. Previously, `execute`
 only *validated* that a move into `IMPLEMENTING` would be legal

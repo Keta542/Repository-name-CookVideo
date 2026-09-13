@@ -80,6 +80,7 @@ npm run inspect   # Verify the CookVideo repo + this control plane's own state
 npm run status    # Concise human-readable summary of current engineering state
 npm run task      # Show the current task's lifecycle phase, risk and approval status
 npm run approve   # Move a task from APPROVAL_REQUIRED to APPROVED (no commit/push/deploy)
+npm run advance -- --to <phase> [--note <text>]   # Record a single real-world lifecycle step
 npm run reset     # Reset task state to empty (does not delete source or repo files)
 npm run execute   # Prepare (SAFE/DRY-RUN by default) a Claude implementation attempt
 npm run plan -- --file <path> [--replace]   # Submit a planner's JSON task definition
@@ -92,6 +93,7 @@ node dist/cli.js inspect
 node dist/cli.js status
 node dist/cli.js task
 node dist/cli.js approve
+node dist/cli.js advance --to <phase> [--note <text>]
 node dist/cli.js reset
 node dist/cli.js execute [--execute]
 node dist/cli.js plan --file <path> [--replace]
@@ -133,6 +135,22 @@ task isn't awaiting approval, and no-ops (still exit 0) if the task is already a
 **It never commits, pushes, or deploys anything** — see "Task lifecycle and approval
 gates" below for why that's deliberate at this stage.
 
+### `advance`
+
+Records a single real-world lifecycle step, one hop at a time: `TESTING`→`REVIEW`,
+`REVIEW`→`APPROVAL_REQUIRED`, `APPROVED`→`COMMITTING`, `COMMITTING`→`DEPLOYING`, or
+`DEPLOYING`→`VERIFYING`. Refuses (non-zero exit) unless the task is already in the exact
+phase that hop requires — no skipping ahead, and it never touches the phases `execute`
+(`IMPLEMENTING`/`TESTING`), `approve` (`APPROVAL_REQUIRED`→`APPROVED`), or `complete`
+(→`COMPLETED`) already own. An optional `--note <text>` is stored verbatim (trimmed) in
+`TASK_STATE.json`'s `result` field — free-text and purely descriptive (e.g. a commit hash or
+a deploy ID), never verified against git or any external system, exactly like `complete
+--commit`'s existing `commitHash` option. **It never edits CookVideo, runs git commit/push,
+or deploys anything** — it only records that a human says a step happened. `cookvideo-agent
+complete` still works exactly as it always has as a single-call shortcut through every
+remaining phase at once; `advance` is additive, for anyone who wants a per-step audit trail
+instead. See "Task lifecycle and approval gates" below.
+
 ### `reset`
 
 Overwrites `.cookvideo/TASK_STATE.json` with a fresh empty state (phase `PLANNED`, no task
@@ -171,9 +189,13 @@ npm test             # builds, then runs the integration + unit test suite
 `npm test` includes an integration test against the real, configured CookVideo repository
 (`src/__tests__/inspect.test.ts`, read-only) alongside unit tests for the task/approval
 engine (`src/__tests__/taskState.test.ts`), the Claude adapter and execution engine
-(`src/__tests__/claude.test.ts`, `src/__tests__/execution.test.ts`), and the task input
-contract and planning engine (`src/__tests__/taskInput.test.ts`) — all of which use
-temporary files and never touch the real `.cookvideo/TASK_STATE.json`.
+(`src/__tests__/claude.test.ts`, `src/__tests__/execution.test.ts`), the task input
+contract and planning engine (`src/__tests__/taskInput.test.ts`), and the `approve`/
+`advance`/`complete` commands (`src/__tests__/approve.test.ts`,
+`src/__tests__/advance.test.ts`, `src/__tests__/complete.test.ts`) — all of which use
+temporary files and never touch the real `.cookvideo/TASK_STATE.json`. `npm run verify`
+chains `typecheck` + `lint` + `test` in one command — see "Verification claims" in
+`.cookvideo/ARCHITECTURE.md` for the rule around what a milestone may claim it covers.
 
 ## Project state (`.cookvideo/`)
 
@@ -222,12 +244,21 @@ The lifecycle exists to enforce `.cookvideo/APPROVAL_POLICY.md`'s three categori
   operations, deleting large groups of project files, changing production secrets. Same
   gate, no exceptions, ever.
 
-As of this milestone, `approve` only flips `APPROVAL_REQUIRED` → `APPROVED`. It does not
-commit, push, deploy, or perform the approved action — that's deliberate. The goal of this
-milestone was to establish the safety/approval model itself before this control plane is
-given the ability to perform any consequential action. Wiring `APPROVED` tasks up to
-actually *doing* the commit/push/deploy step is future work, and will be its own
-explicitly-scoped milestone.
+`approve` only flips `APPROVAL_REQUIRED` → `APPROVED`. It does not commit, push, deploy, or
+perform the approved action — that's deliberate, establishing the safety/approval model
+itself before this control plane is given the ability to perform any consequential action.
+Wiring `APPROVED` tasks up to actually *doing* the commit/push/deploy step remains future
+work, not yet built.
+
+`cookvideo-agent advance` (Milestone 10) lets a human record each remaining step
+individually as it actually happens — `TESTING`→`REVIEW`→`APPROVAL_REQUIRED`, then, once
+`approve`d, `APPROVED`→`COMMITTING`→`DEPLOYING`→`VERIFYING` — instead of only ever seeing one
+bulk `cookvideo-agent complete` call assert the whole remaining walk occurred. This matters
+most for `COMMITTING`/`DEPLOYING`, exactly the two phases the "REQUIRES USER APPROVAL" list
+above is about: `advance` gives each of those its own dated `.cookvideo/BUILD_LOG.md` entry
+(optionally carrying a `--note`, e.g. a commit hash), without granting this control plane any
+new ability to actually perform them. `complete` is unchanged and still works as a one-call
+shortcut for anyone who doesn't need the granular trail.
 
 ## Claude execution adapter
 
@@ -368,7 +399,18 @@ indistinguishable from an engineer acting on it.
 
 ## Current milestone
 
-**Milestone 4 (this one):** the planner → task creation interface — `cookvideo-agent plan`.
+**Milestone 10 (this one):** granular, single-hop lifecycle tracking via `cookvideo-agent
+advance --to <phase> [--note <text>]` — records `TESTING`→`REVIEW`→`APPROVAL_REQUIRED` and,
+once approved, `APPROVED`→`COMMITTING`→`DEPLOYING`→`VERIFYING` one real-world step at a time,
+each with its own dated `BUILD_LOG.md` entry, instead of only ever seeing `complete` assert
+the whole remaining walk in one call. Purely additive: `completeTask`'s existing single-call
+behavior (Milestones 6-7) is unchanged, and `advance` never edits CookVideo or runs git
+commit/push/deploy. See `.cookvideo/DECISIONS.md` and `.cookvideo/BUILD_LOG.md` for the full
+rationale and for Milestones 5-9 (persisted execute lifecycle transitions, the risk-based
+approval gate, target verification, and the build-integrity fix), which this section of
+`README.md` had fallen behind on documenting individually.
+
+**Milestone 4:** the planner → task creation interface — `cookvideo-agent plan`.
 A deterministic JSON handoff boundary (`src/lib/taskInput.ts`), existing-task and
 replacement-safety protection, and a `PLANNED`-only task record. No write access to
 CookVideo, no Claude invocation, no git commit/push, no production-system access — `plan`

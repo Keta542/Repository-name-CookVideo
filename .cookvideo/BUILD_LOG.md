@@ -5,6 +5,71 @@ top.
 
 ---
 
+## 2026-09-13 — Milestone 10: granular single-hop lifecycle tracking (`advance`)
+
+- Closed the gap named as a known limitation in both Milestone 7's and Milestone 8's own
+  `.cookvideo/DECISIONS.md` entries: `completeTask` remained the only way past `TESTING`,
+  validating and applying the *entire* remaining walk to `COMPLETED` -- including
+  `COMMITTING` and `DEPLOYING`, exactly the two phases `.cookvideo/APPROVAL_POLICY.md`'s
+  "REQUIRES USER APPROVAL" list is about -- in one call, with no individual, timestamped
+  record of when each of those real-world actions actually happened.
+- Added `advanceTaskPhase` (`src/lib/taskState.ts`), restricted to exactly five single hops:
+  `TESTING`→`REVIEW`, `REVIEW`→`APPROVAL_REQUIRED`, `APPROVED`→`COMMITTING`,
+  `COMMITTING`→`DEPLOYING`, `DEPLOYING`→`VERIFYING` (`ADVANCEABLE_TARGET_PHASES`/
+  `ADVANCE_SOURCE_PHASE`). Refuses a task not already in the exact required source phase (no
+  skipping ahead), and refuses any target outside that five-member allowlist even where the
+  shared `TRANSITIONS` table itself would technically permit it (`IMPLEMENTING`, `APPROVED`,
+  `COMPLETED` stay exclusively `execute`'s/`approve`'s/`complete`'s). Still checks
+  `isValidTransition` against `TRANSITIONS` defensively underneath -- no parallel state
+  machine. Deliberately never touches `approvalStatus`: whether a task genuinely needs human
+  sign-off stays exclusively `requiresApprovalGate`/`completeTask`'s call (Milestone 7), even
+  when `advance` walks an ungated task into `APPROVAL_REQUIRED` purely for its own record.
+  An optional `--note` is stored verbatim (trimmed) in `result`, exactly like `completeTask`'s
+  existing `commitHash` option -- free-text, purely descriptive, never verified.
+- Added `src/commands/advance.ts` (`runAdvance`, `parseAdvanceCliArgs`,
+  `advanceBuildLogEntry`), mirroring `approve.ts`/`complete.ts`'s injectable-context pattern.
+  Each successful hop writes `TASK_STATE.json`, `ACTIVE_TASK.md`, and its own dated
+  `BUILD_LOG.md` entry together, via the same `formatActiveTaskMarkdown`/
+  `prependBuildLogEntry` helpers every other mutating command already uses; a refusal writes
+  nothing (same `result.state !== state` invariant `approve`/`complete` already rely on).
+- Added CLI command `cookvideo-agent advance --to <REVIEW|APPROVAL_REQUIRED|COMMITTING|
+  DEPLOYING|VERIFYING> [--note <text>]` (`src/cli.ts`), and an `advance` npm script
+  (`package.json`), matching the existing per-command pattern.
+- `completeTask` itself was not changed in any way -- it remains a fully valid single-call
+  path for the common `LOW`-risk case (Milestone 6) and for any gated task once `APPROVED`
+  (Milestone 7); `advance` is additive, not a replacement.
+- Added 8 new tests to `src/__tests__/taskState.test.ts` covering `advanceTaskPhase` directly
+  (all five legal hops; a note being recorded/trimmed vs. left untouched when omitted;
+  `approvalStatus` staying untouched on the `APPROVAL_REQUIRED` hop for an ungated task;
+  refusal from a wrong source phase; refusal when there's no active task; and
+  `isAdvanceableTargetPhase` accepting exactly the five allowed targets and rejecting
+  `IMPLEMENTING`/`APPROVED`/`COMPLETED`/`PLANNED`). Added `src/__tests__/advance.test.ts` (7
+  tests) covering the `TASK_STATE.json`/`ACTIVE_TASK.md`/`BUILD_LOG.md` write behavior, a
+  `--note` being recorded end to end, no write on a refusal, a full `TESTING`→`REVIEW`→
+  `APPROVAL_REQUIRED` walk producing two distinct `BUILD_LOG.md` entries, and
+  `parseAdvanceCliArgs`'s missing-vs-invalid `--to` handling. Full suite: 165/165 passing.
+- Updated `README.md` (`advance` documented alongside `approve`/`reset`; the "Task lifecycle
+  and approval gates" section explains how `advance` and `complete` now relate; the
+  "Current milestone" section, which had fallen behind at Milestone 4 while
+  `ARCHITECTURE.md`/`DECISIONS.md`/`BUILD_LOG.md` stayed current, now has a Milestone 10 entry
+  and a pointer to this log for Milestones 5-9 -- individual Milestone 5-9 README sections are
+  not backfilled, a known, explicitly recorded gap, not silently absorbed into this milestone).
+- Live-smoke-tested the built CLI against the real, unaffected `.cookvideo/TASK_STATE.json`
+  (task `MILESTONE-6-SEARCH-EMPTY-STATE-001`, phase `COMPLETED`): `advance --to REVIEW`
+  correctly refused (task isn't in `TESTING`) without touching any file; `advance --to BOGUS`
+  and bare `advance` (no `--to`) both correctly refused with a clear, distinct error and
+  printed usage; `git diff` on the real `.cookvideo/` files confirmed no unintended writes.
+  A full live walk through real `TESTING`→…→`VERIFYING` was not performed, since reaching
+  `TESTING` for real requires a genuine `execute --execute` Claude invocation, which this
+  milestone has no reason to spawn -- the full walk is instead covered end-to-end against a
+  temp context in `src/__tests__/advance.test.ts`.
+- Did not modify CookVideo, add any Supabase/Vercel/Mux/GitHub integration, add commit/push/
+  deploy automation, or change `.cookvideo/APPROVAL_POLICY.md`. No existing lifecycle
+  transition, approval-gate, or execution behavior (Milestones 1-9) was changed.
+- Verified: `npm run verify` (typecheck + lint + full test suite, 165/165 passing) run against
+  a clean `git status` at the resulting HEAD, confirmed via an isolated `git worktree`
+  checkout of the new commit -- per the Milestone 9 rule.
+
 ## 2026-09-13 — Milestone 9: restore build integrity; add a verification-claim rule
 
 - Discovered that the pushed `master` HEAD (`00ae823`) did not compile: `tsc --noEmit`, run
