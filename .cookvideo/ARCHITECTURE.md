@@ -157,9 +157,35 @@ actually compile (see Milestone 9's `.cookvideo/DECISIONS.md` entry). When in do
 against an isolated `git worktree` checkout of the commit in question, not the working
 directory the milestone was developed in.
 
+As of Milestone 14, this is also checked automatically: `.github/workflows/verify.yml` runs
+`npm ci && npm run verify` on every push to `master` and every pull request targeting it, on
+GitHub's own infrastructure -- independent of whatever is or isn't configured on any
+contributor's machine. This narrows the gap Milestone 9 left open ("enforced by discipline,
+not tooling") but does not close it completely: the workflow reports pass/fail on GitHub, it
+does not by itself block a push to `master` on failure -- that would additionally require
+enabling branch protection on `master` as a required status check, which was deliberately not
+turned on as part of Milestone 14 (see `.cookvideo/DECISIONS.md` for why).
+
 ## Current milestone
 
-**Milestone 12 (this one):** real git commit/push for `APPROVED` tasks. Previously,
+**Milestone 14 (this one):** CI enforcement of `npm run verify`. Previously,
+Milestone 9's "Verification claims" rule above was, by its own admission, "enforced by
+discipline, not tooling" -- nothing blocked a commit or push if `git status` was dirty or
+`verify` was never actually run. Added `.github/workflows/verify.yml`: a single job
+(`actions/checkout` -> `actions/setup-node` pinned to Node 20.x -> `npm ci` -> `npm run
+verify`) that runs on every push to `master` and every pull request targeting it, using this
+repository's existing `origin` GitHub remote. No new npm script -- it runs the exact same
+`npm run verify` a human already runs locally, against CookVideoAgent's own source only.
+Requires no secrets or credentials: `verify` never touches CookVideo, git write operations,
+or any production system. Branch protection making this a *required* (blocking) check was
+considered and deliberately deferred -- the workflow is report-only for now. See
+`.cookvideo/DECISIONS.md` and `.cookvideo/MILESTONE_14_PROPOSAL.md` for the full design and
+the options considered.
+
+**Milestone 13:** real CookVideo test suite execution via `cookvideo-agent test`. See
+`.cookvideo/DECISIONS.md` for the full rationale.
+
+**Milestone 12:** real git commit/push for `APPROVED` tasks. Previously,
 `APPROVAL_POLICY.md` described commit and push as requiring approval but stated that
 performing the approved action was "future work, not yet built" — `approve`/`advance --to
 COMMITTING`/`complete --commit <hash>` only ever *recorded* that a commit happened, via

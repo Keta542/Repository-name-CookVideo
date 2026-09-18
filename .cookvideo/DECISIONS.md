@@ -717,3 +717,75 @@ exactly as predictably as `commit`/`push` already do.
 - `COOKVIDEO_AGENT_TEST_MODE` will default to `dry-run` everywhere this project is actually
   configured when first built, exactly as `EXECUTION_MODE`/`GIT_WRITE_MODE` do today --
   enabling `local` for real remains a separate, deliberate future decision.
+
+---
+
+## 2026-09-18 — CI enforcement of `npm run verify` via GitHub Actions (Milestone 14)
+
+**Problem:** Milestone 9's own "Known limitations" named this gap explicitly and deferred it:
+"The `npm run verify` rule is enforced by discipline, not tooling -- nothing currently blocks
+a commit or push if `git status` is dirty or `verify` was never actually run. A git hook or CI
+check would close that; deliberately deferred as a bigger category of tooling change than this
+milestone's scope." Five milestones later (10-13), that gap was still open -- nothing in this
+repository had ever automatically checked that a pushed commit actually typechecks, lints, and
+passes its own test suite, which is the exact condition that produced the Milestone 9 incident
+in the first place (a pushed `master` HEAD that did not compile).
+
+**Options considered (captured in `.cookvideo/MILESTONE_14_PROPOSAL.md` before any code was
+written):**
+1. A local git hook (`pre-push`, via a committed `.githooks/` directory with `core.hooksPath`,
+   or a tool like `husky`) running `npm run verify` before a push leaves the machine.
+2. A GitHub Actions workflow running `npm ci && npm run verify` on every push and pull request.
+3. Both.
+
+**Decision:** Option 2. Added `.github/workflows/verify.yml`: `actions/checkout` ->
+`actions/setup-node` pinned to Node `20.x` (matching `package.json`'s `"engines": { "node":
+">=20" }`, no multi-version matrix) with npm caching -> `npm ci` -> `npm run verify`. Triggers
+on `push` to `master` and `pull_request` targeting `master`. No new npm script was added --
+the workflow runs the exact `verify` script Milestone 9 already added, unchanged. The workflow
+requires no `secrets:` block: `verify` never touches CookVideo, git write operations, or any
+production system, exactly as it doesn't when run locally.
+
+Two further points decided explicitly, per direction given during proposal review:
+- **Branch protection was deliberately not enabled.** Adding the workflow makes CI *run* and
+  report pass/fail on GitHub, but does not by itself *block* a push or merge on failure --
+  doing that requires a separate GitHub **branch protection** setting on `master` (a required
+  status check), which changes what's allowed to reach a shared branch for anyone with push
+  access. Per this project's own git-safety principles (confirm before actions affecting shared
+  state or policy), this was left as report-only for this milestone; revisit once the workflow
+  has run green for a while.
+- **Node version:** pinned to a single `20.x`, not a matrix, since this is a solo-maintained
+  local tool rather than a published package other people install across arbitrary Node
+  versions -- multi-version testing would be speculative coverage for a scenario that doesn't
+  exist, consistent with this project's existing "don't build for hypothetical future
+  requirements" pattern.
+
+**Why:**
+- A local hook (option 1) can always be bypassed with `git push --no-verify`, and more
+  importantly is not installed automatically on a fresh clone -- it needs a setup step
+  (`git config core.hooksPath .githooks`) that's easy to forget, which is exactly the
+  "enforced by discipline" failure mode this milestone exists to remove. CI runs on GitHub's
+  own infrastructure regardless of what's configured locally, with zero per-clone setup.
+- This repository already has a GitHub remote (`origin` ->
+  `github.com/Keta542/Repository-name-CookVideo`), so Actions required no new infrastructure
+  decision -- it uses what's already there.
+- Reusing the existing `npm run verify` script (rather than reimplementing `typecheck`/`lint`/
+  `test` as separate workflow steps) means CI can never silently diverge from what a human runs
+  locally before considering a milestone done -- one command, one definition, run in both
+  places.
+- Deferring branch protection keeps this milestone to exactly what was proposed and reviewed
+  (a visible, automatic check) without also deciding, in the same change, a separate and
+  materially different question (whether `master` should refuse pushes that fail it).
+
+**Known limitations:**
+- Without branch protection, a failing CI run is *visible* on GitHub but does not *prevent* a
+  further push to `master` -- the gap narrows from "no tooling at all" to "tooling reports the
+  problem but doesn't block it," not to "impossible."
+- CI can only see what's actually pushed to GitHub -- it cannot detect or prevent a bad state
+  existing briefly in a local working tree or an unpushed local branch. It closes the specific
+  failure mode Milestone 9 hit, not every possible way `verify` could be skipped.
+- Does not retroactively re-verify or annotate any historical `BUILD_LOG.md` entry -- exactly
+  like Milestone 9's own equivalent limitation, left as historical record rather than rewritten.
+- Runs only CookVideoAgent's own `npm run verify`. It has no opinion on, and never invokes,
+  `cookvideo-agent test` (CookVideo's real test suite) -- those remain entirely separate
+  concerns, exactly as `.cookvideo/TEST_POLICY.md` already states.

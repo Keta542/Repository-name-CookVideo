@@ -5,6 +5,32 @@ top.
 
 ---
 
+## 2026-09-18 — Milestone 14: CI enforcement of `npm run verify`
+
+- Closed the gap Milestone 9's own "Known limitations" named and deferred: "The `npm run
+  verify` rule is enforced by discipline, not tooling -- nothing currently blocks a commit or
+  push if `git status` is dirty or `verify` was never actually run." Five milestones later
+  (10-13) that gap was still open.
+- Added `.github/workflows/verify.yml`: `actions/checkout` -> `actions/setup-node` (pinned to
+  Node `20.x`, matching `package.json`'s `"engines"`, with npm caching) -> `npm ci` -> `npm run
+  verify`. Triggers on `push` to `master` and `pull_request` targeting `master`. No new npm
+  script -- runs the exact `verify` script Milestone 9 already added. No secrets required.
+- Updated `.cookvideo/ARCHITECTURE.md`'s "Verification claims" section to note CI now checks
+  this automatically, and its "Current milestone" section.
+- Updated `README.md`'s `npm run verify` mention and "Current milestone" section.
+- Recorded the full design, options considered, and the two judgment calls (branch protection
+  deferred; Node version pinned to `20.x`, no matrix) in `.cookvideo/DECISIONS.md`, per the
+  proposal reviewed beforehand in `.cookvideo/MILESTONE_14_PROPOSAL.md`.
+- Deliberately did **not** enable GitHub branch protection on `master` -- the workflow reports
+  pass/fail visibly but does not yet block a push/merge on failure; that remains a distinct,
+  deferred decision.
+- Ran `npm run verify` (`tsc --noEmit` + `eslint` + the full 236-test suite) against a clean
+  working tree before considering this done -- all passing.
+- Did not touch CookVideo, git commit/push, or any production system; the workflow itself has
+  no path to any of them either.
+
+---
+
 ## 2026-09-18 — Milestone 13: real CookVideo test suite execution via `cookvideo-agent test`
 
 - Closed the gap `README.md`'s own "Tools" section listed as outstanding: "Planned, not yet

@@ -263,7 +263,10 @@ suite runner (`src/__tests__/testRun.test.ts`, which runs real `npm test` agains
 temp `npm` projects, never the real CookVideo repository or this one) — all of which use
 temporary files and never touch the real `.cookvideo/TASK_STATE.json`. `npm run verify`
 chains `typecheck` + `lint` + `test` in one command — see "Verification claims" in
-`.cookvideo/ARCHITECTURE.md` for the rule around what a milestone may claim it covers.
+`.cookvideo/ARCHITECTURE.md` for the rule around what a milestone may claim it covers. As of
+Milestone 14, `.github/workflows/verify.yml` runs this same command on every push/PR to
+`master` via GitHub Actions, so a broken `master` HEAD is visible on GitHub even if `verify`
+was skipped locally.
 
 ## Project state (`.cookvideo/`)
 
@@ -555,7 +558,19 @@ indistinguishable from an engineer acting on it.
 
 ## Current milestone
 
-**Milestone 13 (this one):** real CookVideo test suite execution via `cookvideo-agent test`.
+**Milestone 14 (this one):** CI enforcement of `npm run verify`. Previously, the
+"Verification claims" rule (`.cookvideo/ARCHITECTURE.md`, added Milestone 9) was enforced by
+discipline alone — nothing blocked a commit or push if `verify` was never actually run against
+what got pushed, which is exactly how Milestones 6-8 ended up with a broken `master` HEAD.
+Added `.github/workflows/verify.yml`, running `npm ci && npm run verify` on every push to
+`master` and every pull request targeting it, on GitHub's own infrastructure. No new npm
+script, no secrets, no change to `cookvideo-agent execute`/`commit`/`push`/`test` — the
+workflow only ever runs CookVideoAgent's own existing `verify` command against its own source.
+Branch protection making this a required, blocking check was considered and deliberately not
+enabled as part of this milestone — see `.cookvideo/MILESTONE_14_PROPOSAL.md` and
+`.cookvideo/DECISIONS.md` for the full design and open decisions.
+
+**Milestone 13:** real CookVideo test suite execution via `cookvideo-agent test`.
 Previously, `TESTING → REVIEW` only ever happened via a human's free-text, unverified
 `advance --to REVIEW`, or implicitly inside `execute --execute` based on Claude's own exit
 code and whether expected files changed — nothing had ever independently run CookVideo's real
