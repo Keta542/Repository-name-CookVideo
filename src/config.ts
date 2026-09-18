@@ -38,10 +38,12 @@ export const STATE_FILES = [
   "APPROVAL_POLICY.md",
   "EXECUTION_POLICY.md",
   "GIT_WRITE_POLICY.md",
+  "TEST_POLICY.md",
   "TASK_STATE.json",
   "EXECUTION_LOG.json",
   "TASK_HISTORY.json",
   "GIT_WRITE_LOG.json",
+  "TEST_LOG.json",
 ] as const;
 
 // The machine-readable task/approval state file. Read and written only through
@@ -206,3 +208,40 @@ export const GIT_WRITE_LOG_PATH = path.join(STATE_DIR, "GIT_WRITE_LOG.json");
 // internally, so CookVideoAgent's own repository can never become a real
 // git-write target through this feature (see .cookvideo/DECISIONS.md).
 export const GIT_WRITE_TARGET_NAME = "CookVideo";
+
+// ---------------------------------------------------------------------------
+// Milestone 13: real CookVideo test suite execution
+// ---------------------------------------------------------------------------
+
+// A third double gate, deliberately separate from both EXECUTION_MODE and
+// GIT_WRITE_MODE above: invoking Claude, writing to CookVideo's git history,
+// and now independently running CookVideo's own test suite are three
+// different categories of real-world action, so each gets its own
+// environment variable rather than any of them silently enabling another.
+// Same fail-safe-to-dry-run parsing as the other two -- any unrecognized
+// value must never silently enable a real test run.
+export const TEST_MODES = ["dry-run", "local"] as const;
+export type TestMode = (typeof TEST_MODES)[number];
+
+const DEFAULT_TEST_MODE: TestMode = "dry-run";
+
+export function parseTestMode(raw: string | undefined): TestMode {
+  if (raw === "dry-run" || raw === "local") {
+    return raw;
+  }
+  return DEFAULT_TEST_MODE;
+}
+
+export const TEST_MODE_ENV_VAR = "COOKVIDEO_AGENT_TEST_MODE";
+export const TEST_MODE: TestMode = parseTestMode(process.env[TEST_MODE_ENV_VAR]);
+
+// Append-only record of every `cookvideo-agent test` attempt (dry-run or
+// real), mirroring EXECUTION_LOG.json/GIT_WRITE_LOG.json's exact pattern.
+export const TEST_LOG_PATH = path.join(STATE_DIR, "TEST_LOG.json");
+
+// The only execution target `cookvideo-agent test` may ever run real tests
+// against. Resolved through the existing EXECUTION_TARGETS registry above --
+// like GIT_WRITE_TARGET_NAME, not CLI-selectable: src/commands/test.ts
+// hardcodes this constant internally, so real test execution can never be
+// pointed at CookVideoAgent's own repository.
+export const TEST_TARGET_NAME = "CookVideo";

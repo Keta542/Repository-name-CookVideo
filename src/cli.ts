@@ -11,6 +11,7 @@ import { formatExecuteReport, runExecuteCommand } from "./commands/execute.js";
 import { formatPlanReport, runPlanCommand } from "./commands/plan.js";
 import { formatCommitReport, runCommitCommand } from "./commands/commit.js";
 import { formatPushReport, runPushCommand } from "./commands/push.js";
+import { formatTestReport, runTestCommand } from "./commands/test.js";
 
 const USAGE = `cookvideo-agent — CookVideo local control-plane CLI
 
@@ -69,6 +70,13 @@ Usage:
                             -- always its own separate, explicit action. A rejected/diverged
                             push fails visibly and is never force-resolved. Never deploys
                             anything. See .cookvideo/GIT_WRITE_POLICY.md.
+  cookvideo-agent test [--execute]
+                            Requires phase TESTING. Prepares (and, only in local test mode with
+                            --execute, runs) CookVideo's own real \`npm test\` (read from its
+                            package.json, never guessed) against the CookVideo repository only.
+                            Defaults to SAFE/DRY-RUN. A genuine pass moves TESTING -> REVIEW; a
+                            failure or missing test script moves the task to FAILED. See
+                            .cookvideo/TEST_POLICY.md.
   cookvideo-agent help      Show this message
 `;
 
@@ -161,6 +169,12 @@ async function main(argv: string[]): Promise<number> {
       const executeFlag = argv.slice(3).includes("--execute");
       const result = runPushCommand(executeFlag);
       console.log(formatPushReport(result));
+      return result.ok ? 0 : 1;
+    }
+    case "test": {
+      const executeFlag = argv.slice(3).includes("--execute");
+      const result = runTestCommand(executeFlag);
+      console.log(formatTestReport(result));
       return result.ok ? 0 : 1;
     }
     case "help":

@@ -23,6 +23,7 @@
     "plan": "npm run build --silent && node dist/cli.js plan",
     "commit": "npm run build --silent && node dist/cli.js commit",
     "push": "npm run build --silent && node dist/cli.js push",
+    "cookvideo-test": "npm run build --silent && node dist/cli.js test",
     "verify": "npm run typecheck && npm run lint && npm test"
   },
   "engines": {

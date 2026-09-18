@@ -504,6 +504,51 @@ export function applyPushOutcome(
 }
 
 // ---------------------------------------------------------------------------
+// test (real CookVideo test suite execution -- Milestone 13)
+//
+// `cookvideo-agent test` (src/lib/testRun.ts) calls this once a real
+// CookVideo test run's outcome is known (never during dry-run), mirroring
+// applyCommitOutcome/applyPushOutcome's exact shape: no parallel state
+// machine, checked against the same TRANSITIONS table every other lifecycle
+// function in this file already reads. A genuine pass (real `npm test` exit
+// 0) moves TESTING -> REVIEW -- closing the gap README.md's "Tools" section
+// named as outstanding: nothing before this milestone ever independently
+// verified CookVideo's tests, as opposed to trusting a human's free-text
+// `advance --to REVIEW` or execute's own "expected files changed" check. A
+// failing or erroring run moves the task to FAILED, matching Milestone 12's
+// explicit push-failure decision: one consistent meaning for FAILED across
+// every real-action command in this control plane, rather than a cheaper
+// stay-at-TESTING retry path for test failures alone.
+// ---------------------------------------------------------------------------
+export function applyTestOutcome(
+  state: TaskState,
+  succeeded: boolean,
+  resultMessage: string,
+): ExecutionTransitionResult {
+  const nextPhase: TaskPhase = succeeded ? "REVIEW" : "FAILED";
+  if (!isValidTransition(state.phase, nextPhase)) {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId ?? "(unknown)"} is in phase ${state.phase}, which cannot move to ` +
+        `${nextPhase}. Test outcome was not persisted.`,
+    };
+  }
+  const nextState: TaskState = {
+    ...state,
+    phase: nextPhase,
+    result: resultMessage,
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    ok: true,
+    state: nextState,
+    message: `Task ${state.taskId ?? "(unknown)"} moved ${state.phase} -> ${nextPhase}.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // advance (granular single-hop phase tracking -- Milestone 10)
 //
 // Before this, `completeTask` was the only way past TESTING: it validates

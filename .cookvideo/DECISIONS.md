@@ -628,3 +628,92 @@ concern Milestone 8 fixed for `execute`). `applyPushOutcome` therefore leaves `p
   `.cookvideo/TASK_STATE.json`, not via a real commit/push. Enabling `local` mode for real
   remains a deliberate future decision, exactly as `EXECUTION_POLICY.md` already states for
   Claude execution.
+
+---
+
+## 2026-09-18 — Real CookVideo test suite execution via `cookvideo-agent test` (Milestone 13)
+
+**Problem:** `README.md`'s own "Tools" section still listed this as outstanding: "Planned,
+not yet built: running the CookVideo test suite." `TESTING -> REVIEW` could only happen via a
+human's free-text, unverified `cookvideo-agent advance --to REVIEW`, or implicitly inside
+`execute --execute` based on Claude's own exit code and whether expected files changed on
+disk -- `EXECUTION_POLICY.md`'s "Tests may run" during LOCAL execution only ever meant Claude
+*may choose to* run tests as part of its own work. Nothing in this control plane had ever
+independently invoked CookVideo's real test suite and checked a genuine result.
+
+**Options considered (captured during proposal review in
+`.cookvideo/MILESTONE_13_PROPOSAL.md`, before any code was written):**
+1. Fold real test execution into `execute --execute` itself.
+2. Fold it into `advance --to REVIEW`, replacing the free-text assertion with a real check.
+3. A new, separate, dedicated command -- `cookvideo-agent test` -- independent of `execute`,
+   `advance`, `commit`, and `push`.
+
+**Decision:** Option 3, for the same reason Milestone 12 kept `commit` and `push` as separate
+commands rather than folding either into `advance`: lifecycle recording, invoking Claude, and
+now independently verifying tests are three different kinds of action, each deserving its own
+single-purpose command. Specifically:
+
+- Added `src/lib/testRun.ts`: `resolveCookVideoTestCommand` reads CookVideo's real
+  `package.json` and confirms a non-empty `scripts.test` entry exists before anything is
+  spawned -- never hardcoded to `npm test` without checking first, the same "verify against
+  ground truth, never guess" discipline `validateExpectedTargets`/`validateGitWriteScope`
+  already established in `execution.ts`/`gitWrite.ts`. `runCookVideoTests` spawns the real
+  `npm test` (never-throws, mirroring `runGitStep`/`invokeClaude`'s exact "report failure as
+  data" philosophy), reading the genuine exit code back rather than trusting any self-report.
+- Added `cookvideo-agent test [--execute]` (`runTest`, `src/commands/test.ts`): reachable only
+  when the active task's `phase` is exactly `TESTING`. Gated by its own double gate -- an
+  explicit `--execute` flag **and** a new, independent `COOKVIDEO_AGENT_TEST_MODE=local`
+  environment variable (`parseTestMode` in `src/config.ts`, identical fail-safe-to-dry-run
+  parsing to `parseExecutionMode`/`parseGitWriteMode`) -- kept as its own variable rather than
+  reusing either existing one, for the same reason `GIT_WRITE_MODE` was kept separate from
+  `EXECUTION_MODE`: invoking Claude, writing git history, and now running CookVideo's own test
+  suite are three separate categories of real-world action, and enabling one must never
+  silently enable another.
+- On a genuine pass (`npm test` exits 0): persists `TESTING -> REVIEW` via a new
+  `applyTestOutcome` (`src/lib/taskState.ts`), reusing the existing `TRANSITIONS` table -- no
+  new phase, no new transition, exactly like `applyCommitOutcome`/`applyPushOutcome`
+  (Milestone 12).
+- On failure (no resolvable test command, a spawn error, or a real non-zero exit): moves the
+  task to `FAILED`, per the explicit "Fail the run and move to FAILED, same as push" direction
+  -- one consistent meaning for `FAILED` across every real-action command in this control
+  plane (`execute`, `commit`, `push`, and now `test`), rather than a special-cased cheaper
+  retry for test failures alone.
+- Hardcoded to the `CookVideo` execution target only (`TEST_TARGET_NAME` in `src/config.ts`,
+  resolved through the existing `EXECUTION_TARGETS` registry) -- no `--target` flag, matching
+  `commit`/`push`, so real test execution can never be pointed at CookVideoAgent's own
+  repository.
+- Every attempt (dry-run or real, pass or fail) appended to a new `.cookvideo/TEST_LOG.json`,
+  mirroring `EXECUTION_LOG.json`/`GIT_WRITE_LOG.json`'s exact append-only pattern, including
+  the full untruncated stdout/stderr -- `TASK_STATE.json`'s `result` field only ever holds a
+  2000-character tail (`truncateForResult`), per the recommended default in
+  `.cookvideo/MILESTONE_13_PROPOSAL.md`'s "Output volume" decision.
+- The npm convenience script is named `cookvideo-test`, not `test` -- this project's existing
+  `npm test`/`npm run verify` scripts already mean "run/verify CookVideoAgent's *own* test
+  suite," and reusing either name for a command that runs a *different* repository's tests
+  would silently redefine an existing script (`package.json` cannot hold two `"test"` keys)
+  and be genuinely ambiguous in this project's own docs. The `cookvideo-agent test` CLI
+  subcommand name itself is unaffected -- CLI subcommands and npm script names are separate
+  namespaces, and the mismatch only affects the convenience alias.
+
+**Why:** Same rationale as Milestone 12's write-up, restated for this milestone -- a
+deterministic, ground-truth-checked command reused this control plane's own existing patterns
+(never-throws step runner, a dedicated env-var gate, hardcoded target, append-only log,
+`TRANSITIONS`-table-only phase changes) rather than inventing new ones, so `test` behaves
+exactly as predictably as `commit`/`push` already do.
+
+**Known limitations:**
+- `test` never runs `execute` or vice versa -- a task could reach `TESTING` purely via
+  `advance` (a human-implemented task) and `test` would still work, since it only reads
+  CookVideo's current working tree/test script, not how the task got to `TESTING`.
+- Like `getChangedFilePaths` in `gitWrite.ts`, this does not interpret CookVideo's test output
+  beyond the exit code -- a test runner that exits 0 despite real failures (a misconfigured
+  reporter, for example) is reported as a pass. This control plane trusts the exit code as
+  ground truth, exactly as `commit`/`push` trust `git`'s own exit codes.
+- On Windows, running `npm` requires `shell: true` in the underlying `spawnSync` call (`npm`
+  resolves to the `npm.cmd` shim, and Node cannot exec a `.cmd` file directly without a shell)
+  -- the same documented behavior `resolveSpawnOptions`/`quoteForWindowsShell` in
+  `src/agents/claude.ts` already works around for `claude`/`claude.cmd`; `testRun.ts` mirrors
+  that exact pattern rather than introducing a new one.
+- `COOKVIDEO_AGENT_TEST_MODE` will default to `dry-run` everywhere this project is actually
+  configured when first built, exactly as `EXECUTION_MODE`/`GIT_WRITE_MODE` do today --
+  enabling `local` for real remains a separate, deliberate future decision.

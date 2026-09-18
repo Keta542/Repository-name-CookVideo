@@ -5,6 +5,54 @@ top.
 
 ---
 
+## 2026-09-18 — Milestone 13: real CookVideo test suite execution via `cookvideo-agent test`
+
+- Closed the gap `README.md`'s own "Tools" section listed as outstanding: "Planned, not yet
+  built: running the CookVideo test suite." `TESTING -> REVIEW` previously only happened via a
+  human's free-text, unverified `advance --to REVIEW`, or implicitly inside `execute --execute`
+  based on Claude's own exit code -- nothing had ever independently run CookVideo's real tests
+  and checked a genuine result.
+- Added `src/lib/testRun.ts`: `resolveCookVideoTestCommand` reads CookVideo's real
+  `package.json` and confirms a non-empty `scripts.test` entry exists before anything is
+  spawned (never hardcoded to `npm test` without checking first). `runCookVideoTests` runs it
+  for real, never-throws, reading the genuine exit code back. Added `cookvideo-agent test
+  [--execute]` (`src/commands/test.ts`), reachable only when `phase: TESTING`, gated by its own
+  double gate: an explicit `--execute` flag *and* a new `COOKVIDEO_AGENT_TEST_MODE=local`
+  (`src/config.ts`, `parseTestMode`, mirroring `EXECUTION_MODE`/`GIT_WRITE_MODE`'s exact
+  fail-safe-to-dry-run parsing) -- a third, independent environment variable, deliberately not
+  reused from either existing gate. Hardcoded to the `CookVideo` execution target only (no
+  `--target` flag), matching `commit`/`push`.
+- Added `applyTestOutcome` (`src/lib/taskState.ts`), mirroring `applyCommitOutcome`/
+  `applyPushOutcome`'s exact shape and reusing the existing `TRANSITIONS` table -- no new
+  lifecycle phase or transition. A genuine pass moves `TESTING` -> `REVIEW`; any failure (no
+  resolvable test command, a spawn error, or a real non-zero exit) moves the task to `FAILED`,
+  per explicit direction: "Fail the run and move to FAILED, same as push."
+- Every `test` attempt (dry-run or real, pass or fail) is appended to a new
+  `.cookvideo/TEST_LOG.json` (mirroring `EXECUTION_LOG.json`/`GIT_WRITE_LOG.json`'s exact
+  append-only pattern), including the full untruncated stdout/stderr -- `TASK_STATE.json`'s
+  `result` field only ever holds a 2000-character tail (`truncateForResult`), so a large test
+  output can never balloon the state file while the full record still survives in the log.
+- New `.cookvideo/TEST_POLICY.md` documents the double gate and failure handling, mirroring
+  `EXECUTION_POLICY.md`/`GIT_WRITE_POLICY.md`'s structure. `.cookvideo/MILESTONE_13_PROPOSAL.md`
+  captures the design discussion and options considered before any code was written, and
+  `.cookvideo/DECISIONS.md` records the final decision.
+- The npm convenience script is `npm run cookvideo-test`, not `npm run test` -- this project's
+  existing `test`/`verify` scripts already mean "run/verify CookVideoAgent's own test suite,"
+  and `package.json` cannot hold two `"test"` keys; the `cookvideo-agent test` CLI subcommand
+  name itself (a separate namespace) is unaffected.
+- Test coverage: `src/__tests__/testRun.test.ts` (new) exercises `resolveCookVideoTestCommand`
+  against real temporary CookVideo-shaped repositories (missing `package.json`, missing
+  `scripts.test`, present `scripts.test`), `runCookVideoTests` against a real throwaway `npm`
+  project with a passing and a failing test script, `truncateForResult`'s bound, the test log's
+  append-only behavior, and `runTest`'s full dry-run/pre-flight-refusal/real-pass/real-fail
+  flows -- plus `parseTestMode`'s fail-safe parsing, mirroring where `parseGitWriteMode`'s own
+  tests live (`src/__tests__/gitWrite.test.ts`, not `config.test.ts`).
+- Purely additive: `execute`/`commit`/`push`/`advance`/`complete` are all unchanged, no new
+  lifecycle phase or transition was introduced, and `APPROVAL_POLICY.md`'s categories are
+  unchanged ("Run local tests" was already `AUTOMATIC` before this milestone).
+
+---
+
 ## 2026-09-17 — Milestone 12: real git commit/push for `APPROVED` tasks
 
 - Closed the gap named and deliberately deferred at the end of Milestone 11's own

@@ -36,10 +36,10 @@ Two more pieces the control plane is built around:
   branch, commit, and clean/dirty state are always read directly from git, never inferred
   or guessed.
 - **Tools** are what the control plane (and eventually the agents it coordinates) can act
-  through. Today: the filesystem and Git, read-only, plus a local task/approval state
-  machine (see below). Planned, not yet built: running the CookVideo test suite, and —
-  later, deliberately, one at a time, only when a concrete task needs it — authenticated
-  access to Supabase, Vercel, Mux, and GitHub.
+  through. Today: the filesystem and Git, read-only; a local task/approval state machine (see
+  below); and, as of Milestone 13, running CookVideo's own real test suite (`cookvideo-agent
+  test`). Planned, not yet built — later, deliberately, one at a time, only when a concrete
+  task needs it — authenticated access to Supabase, Vercel, Mux, and GitHub.
 
 ## What this is not
 
@@ -90,6 +90,7 @@ npm run execute   # Prepare (SAFE/DRY-RUN by default) a Claude implementation at
 npm run plan -- --file <path> [--replace]   # Submit a planner's JSON task definition
 npm run commit -- [--execute]   # Requires phase APPROVED; real git commit is SAFE/DRY-RUN by default
 npm run push -- [--execute]     # Requires phase COMMITTING; real git push is SAFE/DRY-RUN by default
+npm run cookvideo-test -- [--execute]   # Requires phase TESTING; real CookVideo `npm test` is SAFE/DRY-RUN by default
 ```
 
 Equivalently, once built, invoke the local CLI entry point directly:
@@ -106,6 +107,7 @@ node dist/cli.js execute [--execute]
 node dist/cli.js plan --file <path> [--replace]
 node dist/cli.js commit [--execute]
 node dist/cli.js push [--execute]
+node dist/cli.js test [--execute]
 node dist/cli.js help
 ```
 
@@ -225,6 +227,19 @@ successful push leaves the phase at `COMMITTING` (it is not a deploy); a failed 
 the task to `FAILED`, preserving the already-recorded local commit hash. See "Git
 commit/push" below and `.cookvideo/GIT_WRITE_POLICY.md`.
 
+### `test`
+
+Requires the active task to be exactly `phase: TESTING`; refuses otherwise. Prepares (and,
+only when explicitly allowed, runs) a real `npm test` against the CookVideo repository —
+never this repository, and never CLI-selectable to another target. The test command is read
+from CookVideo's own `package.json` (`scripts.test`), never assumed. Defaults to
+**SAFE/DRY-RUN**: previews the resolved test command without running it. Real execution
+requires both `--execute` on the command line *and* `COOKVIDEO_AGENT_TEST_MODE=local` in the
+environment. On a genuine pass (real exit code 0), persists `TESTING → REVIEW`. On any
+failure (no resolvable `scripts.test`, a spawn error, or a real non-zero exit), moves the task
+to `FAILED` — the same "any doubt → FAILED" handling as a failed `commit`/`push`. See "Real
+CookVideo test suite execution" below and `.cookvideo/TEST_POLICY.md`.
+
 ## Development
 
 ```sh
@@ -241,9 +256,11 @@ contract and planning engine (`src/__tests__/taskInput.test.ts`), the `approve`/
 `advance`/`complete`/`reset` commands (`src/__tests__/approve.test.ts`,
 `src/__tests__/advance.test.ts`, `src/__tests__/complete.test.ts`,
 `src/__tests__/reset.test.ts`), the task history archive
-(`src/__tests__/taskHistory.test.ts`), and the real git commit/push module
+(`src/__tests__/taskHistory.test.ts`), the real git commit/push module
 (`src/__tests__/gitWrite.test.ts`, which runs real `git` against throwaway temp
-repositories, never the real CookVideo repository or this one) — all of which use
+repositories, never the real CookVideo repository or this one), and the real CookVideo test
+suite runner (`src/__tests__/testRun.test.ts`, which runs real `npm test` against throwaway
+temp `npm` projects, never the real CookVideo repository or this one) — all of which use
 temporary files and never touch the real `.cookvideo/TASK_STATE.json`. `npm run verify`
 chains `typecheck` + `lint` + `test` in one command — see "Verification claims" in
 `.cookvideo/ARCHITECTURE.md` for the rule around what a milestone may claim it covers.
@@ -263,10 +280,12 @@ it) read and update over time:
 | `APPROVAL_POLICY.md` | What CookVideo Agent may do automatically vs. what requires human approval |
 | `EXECUTION_POLICY.md` | What the Claude execution adapter may do in DRY-RUN vs. LOCAL mode |
 | `GIT_WRITE_POLICY.md` | What `commit`/`push` may do in DRY-RUN vs. LOCAL mode |
+| `TEST_POLICY.md` | What `test` may do in DRY-RUN vs. LOCAL mode |
 | `TASK_STATE.json` | Machine-readable current task state — the source `task`/`approve`/`reset` operate on |
 | `EXECUTION_LOG.json` | Append-only record of every `execute` attempt (dry-run or real), one entry per run |
 | `TASK_HISTORY.json` | Append-only archive of every task that has left the active slot, via `reset` or `plan --replace` |
 | `GIT_WRITE_LOG.json` | Append-only record of every `commit`/`push` attempt (dry-run or real), one entry per run |
+| `TEST_LOG.json` | Append-only record of every `test` attempt (dry-run or real), one entry per run |
 
 ## Task lifecycle and approval gates
 
@@ -360,6 +379,42 @@ See `.cookvideo/GIT_WRITE_POLICY.md` for the full policy text and
 `.cookvideo/DECISIONS.md` for the design rationale, including the explicit choice that a
 failed push (after a successful commit) still moves the task to `FAILED` rather than staying
 at `COMMITTING` for a cheaper retry.
+
+## Real CookVideo test suite execution
+
+Milestone 13 closes a gap this document itself used to name as outstanding: nothing before
+this milestone ever independently ran CookVideo's real test suite and checked a genuine
+result — `src/lib/testRun.ts`, and the `cookvideo-agent test` command built on it.
+
+- **Read from CookVideo, never guessed.** Before running anything, `test` reads CookVideo's
+  own `package.json` and confirms a non-empty `scripts.test` entry exists
+  (`resolveCookVideoTestCommand`) — it never assumes `npm test` will work, and refuses cleanly
+  rather than spawning `npm test` and hoping npm's own "missing script" error is clear.
+- **Eligible target: CookVideo only, not CLI-selectable.** Like `commit`/`push`, `test` is
+  hardcoded to the `CookVideo` execution target — no `--target` flag, so there is no input by
+  which a real test run can ever be pointed at CookVideoAgent's own repository.
+- **A third, separate double gate.** `COOKVIDEO_AGENT_TEST_MODE` (`dry-run` or `local`;
+  same fail-safe-to-dry-run parsing as `COOKVIDEO_AGENT_EXECUTION_MODE`/
+  `COOKVIDEO_AGENT_GIT_WRITE_MODE`) plus the `--execute` CLI flag — both required, or the
+  command stays dry-run. Deliberately independent of the other two: invoking Claude, writing
+  git history, and running CookVideo's own tests are three separate decisions an operator must
+  each make.
+- **Phase-gated on top of the double gate.** `test` additionally requires `phase: TESTING`.
+- **Genuine result, never self-reported.** The real process exit code is read straight from
+  the spawned `npm test`. A genuine pass (`exitCode === 0`) moves `TESTING → REVIEW`. Any
+  failure — no resolvable `scripts.test`, a spawn error, or a real non-zero exit — moves the
+  task to `FAILED`, the same "any doubt → FAILED" handling Milestone 12 established for a
+  failed `commit`/`push`, per explicit direction to keep that meaning consistent.
+- **Bounded state, unbounded log.** `TASK_STATE.json`'s `result` field only ever holds a
+  2000-character tail of a failing run's output; the full, untruncated stdout/stderr always
+  survives in `.cookvideo/TEST_LOG.json`.
+- **Every attempt is logged.** Dry-run or real, pass or fail, each `test` attempt is appended
+  to `.cookvideo/TEST_LOG.json`, mirroring `.cookvideo/EXECUTION_LOG.json`/
+  `.cookvideo/GIT_WRITE_LOG.json`'s exact pattern.
+
+See `.cookvideo/TEST_POLICY.md` for the full policy text, `.cookvideo/MILESTONE_13_PROPOSAL.md`
+for the design discussion and options considered before any code was written, and
+`.cookvideo/DECISIONS.md` for the recorded decision.
 
 ## Claude execution adapter
 
@@ -500,7 +555,21 @@ indistinguishable from an engineer acting on it.
 
 ## Current milestone
 
-**Milestone 12 (this one):** real `git commit`/`git push` for `APPROVED` tasks, as two
+**Milestone 13 (this one):** real CookVideo test suite execution via `cookvideo-agent test`.
+Previously, `TESTING → REVIEW` only ever happened via a human's free-text, unverified
+`advance --to REVIEW`, or implicitly inside `execute --execute` based on Claude's own exit
+code and whether expected files changed — nothing had ever independently run CookVideo's real
+tests and checked a genuine result, exactly the gap this document's own "Tools" section used
+to list as outstanding. Added `cookvideo-agent test [--execute]` (requires `phase: TESTING`;
+reads CookVideo's real `package.json` for a `scripts.test` entry, never guessed; runs the real
+`npm test`; on a genuine pass persists `TESTING → REVIEW`, or `→ FAILED` on any doubt —
+no resolvable test command, a spawn error, or a real non-zero exit, matching Milestone 12's
+`FAILED` handling for a failed push). Gated by its own double gate (`--execute` AND
+`COOKVIDEO_AGENT_TEST_MODE=local`) and hardcoded to the `CookVideo` execution target only —
+see "Real CookVideo test suite execution" above, `.cookvideo/TEST_POLICY.md`,
+`.cookvideo/MILESTONE_13_PROPOSAL.md`, and `.cookvideo/DECISIONS.md` for the full design.
+
+**Milestone 12:** real `git commit`/`git push` for `APPROVED` tasks, as two
 separate commands. Previously, `.cookvideo/APPROVAL_POLICY.md` described commit/push as
 requiring approval but stated that performing the approved action was "future work, not yet
 built" — `approve`/`advance --to COMMITTING`/`complete --commit <hash>` only ever *recorded*
