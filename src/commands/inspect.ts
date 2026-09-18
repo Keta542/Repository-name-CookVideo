@@ -13,13 +13,29 @@ export interface InspectResult {
   stateDir: StateDirInfo;
 }
 
+// Every field is optional and defaults to the real configured location -- omitting
+// `options` entirely (as both CLI call sites, `cli.ts` and `status.ts`, always do) reproduces
+// the exact real-repository behavior this function has always had. This exists solely so the
+// test suite can point runInspect() at a throwaway fixture instead of the real, developer-
+// machine-only CookVideo checkout -- never used to change what `cookvideo-agent inspect`
+// itself reports.
+export interface InspectOptions {
+  repoPath?: string;
+  appRelativePath?: string;
+  stateDirPath?: string;
+}
+
 // Pure data-gathering step (no console output) so it can be reused by both the `inspect`
-// CLI command and the automated test that proves this actually works against the real
-// CookVideo repository.
-export function runInspect(): InspectResult {
-  const repo = checkCookVideoRepo(COOKVIDEO_REPO_PATH, COOKVIDEO_APP_RELATIVE_PATH);
-  const git = getGitInfo(COOKVIDEO_REPO_PATH);
-  const stateDir = checkStateDir(STATE_DIR);
+// CLI command and the automated test that proves this actually works against a real
+// CookVideo-shaped repository.
+export function runInspect(options: InspectOptions = {}): InspectResult {
+  const repoPath = options.repoPath ?? COOKVIDEO_REPO_PATH;
+  const appRelativePath = options.appRelativePath ?? COOKVIDEO_APP_RELATIVE_PATH;
+  const stateDirPath = options.stateDirPath ?? STATE_DIR;
+
+  const repo = checkCookVideoRepo(repoPath, appRelativePath);
+  const git = getGitInfo(repoPath);
+  const stateDir = checkStateDir(stateDirPath);
   return { repo, git, stateDir };
 }
 
