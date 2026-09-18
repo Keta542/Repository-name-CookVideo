@@ -37,9 +37,11 @@ export const STATE_FILES = [
   "BUILD_LOG.md",
   "APPROVAL_POLICY.md",
   "EXECUTION_POLICY.md",
+  "GIT_WRITE_POLICY.md",
   "TASK_STATE.json",
   "EXECUTION_LOG.json",
   "TASK_HISTORY.json",
+  "GIT_WRITE_LOG.json",
 ] as const;
 
 // The machine-readable task/approval state file. Read and written only through
@@ -165,3 +167,42 @@ export function resolveExecutionTarget(name: string): ExecutionTarget | null {
 export function listExecutionTargetNames(): string[] {
   return EXECUTION_TARGETS.map((target) => target.name);
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 12: real git commit/push for APPROVED tasks
+// ---------------------------------------------------------------------------
+
+// A second double gate, deliberately separate from EXECUTION_MODE above:
+// invoking Claude to attempt implementation work and actually writing to
+// CookVideo's git history are different categories of risk, so they are
+// controlled by their own environment variable even though the parsing
+// shape is identical -- any unrecognized value fails safe to "dry-run", for
+// the same reason EXECUTION_MODE does (a typo must never silently enable a
+// real git write).
+export const GIT_WRITE_MODES = ["dry-run", "local"] as const;
+export type GitWriteMode = (typeof GIT_WRITE_MODES)[number];
+
+const DEFAULT_GIT_WRITE_MODE: GitWriteMode = "dry-run";
+
+export function parseGitWriteMode(raw: string | undefined): GitWriteMode {
+  if (raw === "dry-run" || raw === "local") {
+    return raw;
+  }
+  return DEFAULT_GIT_WRITE_MODE;
+}
+
+export const GIT_WRITE_MODE_ENV_VAR = "COOKVIDEO_AGENT_GIT_WRITE_MODE";
+export const GIT_WRITE_MODE: GitWriteMode = parseGitWriteMode(process.env[GIT_WRITE_MODE_ENV_VAR]);
+
+// Append-only record of every `commit`/`push` attempt (dry-run or real),
+// mirroring EXECUTION_LOG.json's exact existing pattern.
+export const GIT_WRITE_LOG_PATH = path.join(STATE_DIR, "GIT_WRITE_LOG.json");
+
+// The only execution target `cookvideo-agent commit`/`cookvideo-agent push`
+// may ever write to for real. Resolved through the existing
+// EXECUTION_TARGETS registry above (never a raw path) -- but, unlike
+// `execute --target`, this name is not operator-selectable via a CLI flag:
+// src/commands/commit.ts and src/commands/push.ts hardcode this constant
+// internally, so CookVideoAgent's own repository can never become a real
+// git-write target through this feature (see .cookvideo/DECISIONS.md).
+export const GIT_WRITE_TARGET_NAME = "CookVideo";

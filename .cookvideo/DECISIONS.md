@@ -497,3 +497,134 @@ rather than only ever read by a future automated consumer.
   commit`/`git push` against CookVideo) as "future work, not yet built" -- deliberately not
   folded into this milestone; see the Milestone 11 proposal discussion for why that's a
   separate, materially higher-risk decision.
+
+---
+
+## 2026-09-17 — Real git commit/push for `APPROVED` tasks, as two separate commands
+(Milestone 12)
+
+**Problem:** The gap named and deliberately deferred at the end of Milestone 11's entry above.
+`.cookvideo/APPROVAL_POLICY.md` lists "Git commit" and "Git push" as requiring human approval,
+and the task lifecycle has phases named exactly for them (`COMMITTING`, `DEPLOYING`), but
+nothing in this control plane had ever run `git add`/`git commit`/`git push` for real --
+`approve` only flips `approvalStatus`, and `advance --to COMMITTING`/`complete --commit <hash>`
+only record a human-supplied, unverified string. `src/lib/git.ts` remained entirely read-only
+(`rev-parse`, `status --porcelain`). This is the last mile between an `APPROVED` task and a
+real change landing in the CookVideo repository.
+
+**Options considered (captured during proposal review, before any code was written):**
+1. Extend `cookvideo-agent advance --to COMMITTING` with a real-action mode, folding lifecycle
+   recording and real repository mutation into one command.
+2. Add one combined `cookvideo-agent commit` command that both commits and pushes behind a
+   single `--execute` flag.
+3. Add two separate, dedicated commands -- `cookvideo-agent commit` and `cookvideo-agent push`
+   -- each with its own `--execute` flag, neither ever invoking the other.
+
+**Decision:** Option 3, per explicit direction: lifecycle recording (`advance`) and real
+repository mutation (`commit`/`push`) are kept as separate concepts, and commit/push are two
+separate explicit actions with no automatic chaining. Specifically:
+
+- `cookvideo-agent commit [--execute]` (`src/lib/gitWrite.ts`'s `runCommitWrite`,
+  `src/commands/commit.ts`): reachable only when the active task's `phase` is exactly
+  `APPROVED` and `approvalStatus` is exactly `APPROVED`. Refuses (touching nothing) in a
+  detached HEAD state. Validates the real CookVideo working tree's changes (`git status
+  --porcelain`, via `validateGitWriteScope`) are entirely within the task's
+  `filesExpectedToChange` before staging anything -- never `git add -A`/`.`. Commits with a
+  fully deterministic message (`CookVideoAgent: <taskId>` subject, the task's `objective` as
+  body) with no free-form override in this milestone. Reads the resulting hash back via `git
+  rev-parse HEAD` (never self-reported) and persists `APPROVED → COMMITTING` via a new
+  `applyCommitOutcome` (`src/lib/taskState.ts`), built on the existing `TRANSITIONS` table --
+  no new phase, no new transition. Any failure (scope mismatch, nothing to commit, detached
+  HEAD, a real `git add`/`git commit` error) moves the task to `FAILED` instead, mirroring
+  `applyExecutionOutcome`'s existing "any doubt about whether the real action happened ->
+  FAILED" philosophy from Milestone 8.
+- `cookvideo-agent push [--execute]` (`runPushWrite`, `src/commands/push.ts`): reachable only
+  when `phase` is exactly `COMMITTING`. Never invoked by `commit`, and cannot invoke `commit`.
+  Checks git's own upstream-ahead count before attempting anything (refusing distinctly for "no
+  upstream configured" vs. "nothing to push"), then runs a plain `git push` -- current branch
+  only, no explicit refspec, no `-u`, no `--force`. A rejected/non-fast-forward push surfaces
+  git's own error verbatim and is never force-resolved, retried automatically, or silently
+  swallowed.
+- Both commands are gated by their own double gate: an explicit `--execute` flag **and** a new
+  `COOKVIDEO_AGENT_GIT_WRITE_MODE=local` environment variable (`src/config.ts`,
+  `parseGitWriteMode`), mirroring `COOKVIDEO_AGENT_EXECUTION_MODE`'s exact fail-safe-to-dry-run
+  parsing -- deliberately a *separate* variable from `EXECUTION_MODE`, since invoking Claude and
+  writing to CookVideo's git history are different categories of risk.
+- Both commands are hardcoded to the `CookVideo` execution target (`GIT_WRITE_TARGET_NAME` in
+  `src/config.ts`, resolved through the existing `EXECUTION_TARGETS` registry) -- unlike
+  `execute --target`, neither command accepts a `--target` flag, so there is no input by which
+  a real git write can ever be pointed at CookVideoAgent's own repository.
+- Every attempt (dry-run or real, success or failure) is appended to a new
+  `.cookvideo/GIT_WRITE_LOG.json`, mirroring `EXECUTION_LOG.json`'s exact append-only pattern.
+
+**A real design fork, decided explicitly rather than assumed -- what happens when a real push
+fails after a real commit already succeeded:** the task moves to `FAILED`, exactly like a
+failed commit (`applyPushOutcome`), rather than staying at `COMMITTING` for a cheaper retry.
+This was a genuine choice: `FAILED`'s only recovery path in `TRANSITIONS`
+(`RECOVERABLE_FROM_STUCK`) goes back to `PLANNED`/`IMPLEMENTING`, so a task that fails at push
+for a purely transient reason (network blip, expired credentials, someone else's commit landing
+first) must walk all the way back through `IMPLEMENTING → TESTING → REVIEW →
+APPROVAL_REQUIRED → APPROVED` before `commit`/`push` can be attempted again, even though the
+implementation and the local commit were both already fine. This was chosen anyway, for
+consistency: it keeps exactly one failure-handling rule across both real git-write actions
+(commit and push), rather than a special case for push alone, and it keeps `FAILED` meaning the
+same thing everywhere in this control plane -- "a real action this control plane attempted did
+not verifiably complete." The local commit hash is never lost either way, since it stays
+recorded in `result` from the original `commit` call and `applyPushOutcome`'s failure path
+preserves it in the new failure message too.
+
+**A second, related design point -- a successful push does not advance the phase to
+`DEPLOYING`:** `DEPLOYING` already means a real production deployment elsewhere in this
+project's vocabulary (`APPROVAL_POLICY.md` lists "Git push" and "Production Vercel deployment"
+as separate items), and `TASK_STATE.json` claiming a production deploy happened when only a git
+push did would be exactly the kind of drift this control plane exists to prevent (the same
+concern Milestone 8 fixed for `execute`). `applyPushOutcome` therefore leaves `phase` at
+`COMMITTING` on success, only updating `result`/`updatedAt` to record the confirmed push.
+`advance --to DEPLOYING` remains exactly as manual/descriptive as it always has been.
+
+**Why (the overall design):**
+- Keeping `commit`/`push` structurally separate from `advance` preserves `advance`'s existing,
+  already-tested "purely descriptive, human-recorded, never verified against git" semantics
+  (Milestone 10) untouched -- `commit`/`push` are a different kind of action (they actually run
+  git) and deserve their own commands rather than overloading `advance`'s contract.
+- A deterministic, non-overridable commit message removes an entire class of risk (an operator
+  or planner supplying an arbitrary string that becomes permanent CookVideo git history) for a
+  minimal loss of flexibility -- a future milestone could add a reviewed override if it turns
+  out to be needed.
+- Scope-checking the real working tree before staging anything (rather than trusting
+  `filesExpectedToChange` blindly, or trusting Claude's own execution report) reuses the same
+  "verify against ground truth, never guess" discipline `validateExpectedTargets`/
+  `verifyExpectedFilesChanged` already established in `src/lib/execution.ts` for the analogous
+  question during `execute`.
+- A second, separate `COOKVIDEO_AGENT_GIT_WRITE_MODE` (rather than reusing
+  `COOKVIDEO_AGENT_EXECUTION_MODE`) means enabling real Claude execution and enabling real git
+  writes are two independent decisions an operator must each make deliberately -- flipping one
+  on was never meant to silently flip the other on too.
+- Hardcoding the target (no `--target` flag) closes off the one input surface that could
+  otherwise point this feature at the wrong repository -- there is no name or path any caller
+  can supply to reach CookVideoAgent's own repository through `commit`/`push`.
+
+**Known limitations:**
+- `getUpstreamAheadCount`'s pre-push check assumes a conventional upstream-tracking setup
+  (`@{u}` resolves). A CookVideo branch that has never been pushed before and has no tracking
+  branch configured is refused with a clear message rather than being pushed with an implicit
+  `-u`/`--set-upstream` -- this milestone deliberately does not add branch/upstream setup of any
+  kind (see "Branch policy" in the Milestone 12 proposal discussion).
+  Nothing in the CookVideo repository has been verified with this in mind since the
+  currently-configured branch already has a tracking upstream; this is a defensive fallback, not
+  yet exercised for real.
+- As decided above, a failed push forces recovery back through
+  `PLANNED`/`IMPLEMENTING`/`TESTING`/`REVIEW`/`APPROVAL_REQUIRED`/`APPROVED` even when the only
+  actual problem was the push step -- a heavier recovery than strictly necessary, accepted for
+  consistency with `FAILED`'s existing meaning elsewhere in this control plane.
+- `getChangedFilePaths`'s `git status --porcelain` parsing is pragmatic, not exhaustive -- like
+  `resolveExpectedTargetPath` in `execution.ts`, it does not attempt to handle quoted/escaped
+  paths for filenames containing unusual characters (quotes, embedded newlines). Acceptable for
+  this control plane's controlled, human-reviewed task inputs.
+- `COOKVIDEO_AGENT_GIT_WRITE_MODE` defaults to `dry-run` everywhere this project is actually
+  configured, and has not been set to `local` in any real environment as part of this milestone
+  -- real commit/push against the live CookVideo repository was verified via temporary git
+  repositories in the test suite and a live dry-run smoke test against the real, unaffected
+  `.cookvideo/TASK_STATE.json`, not via a real commit/push. Enabling `local` mode for real
+  remains a deliberate future decision, exactly as `EXECUTION_POLICY.md` already states for
+  Claude execution.

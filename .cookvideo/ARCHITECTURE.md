@@ -69,19 +69,34 @@ cookvideo-agent execute [--execute]
 Claude (implementation engineer) — reads/edits CookVideo, runs tests, reports back
    ▼
 TASK_STATE.json  (phase: TESTING or FAILED)
-   │  a human (or a future milestone's own automation) advances a TESTING task the
-   │  rest of the way: REVIEW → APPROVAL_REQUIRED → APPROVED → COMMITTING → DEPLOYING
-   │  → VERIFYING → COMPLETED (src/lib/taskState.ts; `cookvideo-agent complete` can
-   │  validate and apply that whole remaining walk at once)
+   │  a human (or a future milestone's own automation) advances a TESTING task through
+   │  REVIEW → APPROVAL_REQUIRED → APPROVED (`cookvideo-agent advance` / `approve`)
+   ▼
+cookvideo-agent commit [--execute]
+   │  requires phase APPROVED + approvalStatus APPROVED; only with its own double gate
+   │  (--execute AND COOKVIDEO_AGENT_GIT_WRITE_MODE=local) does it run a real `git add`/
+   │  `git commit` against the CookVideo repository, then persist APPROVED → COMMITTING
+   │  (or → FAILED on any doubt). Dry-run persists nothing. See GIT_WRITE_POLICY.md.
+   ▼
+cookvideo-agent push [--execute]
+   │  requires phase COMMITTING; its own separate double gate runs a real `git push`
+   │  (never chained from `commit`). A successful push stays at COMMITTING (it is not a
+   │  deploy); a failed push moves to FAILED, preserving the local commit hash.
+   ▼
+TASK_STATE.json  (phase: COMMITTING)
+   │  DEPLOYING → VERIFYING → COMPLETED remain exactly as manual/descriptive as before —
+   │  `cookvideo-agent advance`/`complete` — for whenever a real deploy happens outside
+   │  this control plane.
 ```
 
 `plan` only ever produces a `PLANNED` task. It never edits CookVideo, never invokes Claude,
 never runs `git commit`/`git push`, and never touches Supabase, Vercel, Mux, GitHub, or any
 production secret — by construction, since `src/lib/plan.ts` only writes to the three
 configured control-plane paths (`TASK_STATE.json`, `ACTIVE_TASK.md`, `BUILD_LOG.md`).
-Execution (invoking Claude for real) and commit/push (via `approve`, still not itself wired
-to perform the action) each remain their own, separately approval-gated steps — planning a
-task creates work; it never starts it.
+Execution (invoking Claude for real) and real git commit/push (`cookvideo-agent commit`/
+`cookvideo-agent push`, Milestone 12) each remain their own, separately gated steps, each
+behind its own double gate plus the task's own approval status — planning a task creates
+work; it never starts it, and approving it never performs anything by itself either.
 
 ## Control-plane state (`.cookvideo/`)
 
@@ -101,11 +116,14 @@ process actually runs:
   approval (commit, push, production Supabase/Vercel/Mux actions)
 - `EXECUTION_POLICY.md` — the narrower DRY-RUN/LOCAL policy specifically for invoking Claude
   through `cookvideo-agent execute`
+- `GIT_WRITE_POLICY.md` — the narrower DRY-RUN/LOCAL policy specifically for real git
+  commit/push through `cookvideo-agent commit`/`cookvideo-agent push`
 - `TASK_STATE.json` — machine-readable current task state, written only by `plan`, `approve`,
-  `reset`, and (for its own bookkeeping) `execute`
+  `reset`, and (for its own bookkeeping) `execute`, `commit`, `push`
 - `EXECUTION_LOG.json` — append-only record of every `execute` attempt (dry-run or real)
 - `TASK_HISTORY.json` — append-only archive of every task that has left the active
   `TASK_STATE.json` slot, via `reset` or `plan --replace`
+- `GIT_WRITE_LOG.json` — append-only record of every `commit`/`push` attempt (dry-run or real)
 
 ## Task input contract (`src/lib/taskInput.ts`)
 
@@ -141,7 +159,35 @@ directory the milestone was developed in.
 
 ## Current milestone
 
-**Milestone 11 (this one):** preserve completed/abandoned task history. Previously, `reset`
+**Milestone 12 (this one):** real git commit/push for `APPROVED` tasks. Previously,
+`APPROVAL_POLICY.md` described commit and push as requiring approval but stated that
+performing the approved action was "future work, not yet built" — `approve`/`advance --to
+COMMITTING`/`complete --commit <hash>` only ever *recorded* that a commit happened, via
+free-text a human supplied; nothing in this control plane had ever run `git add`/`git commit`/
+`git push` for real. Added two new, deliberately separate commands: `cookvideo-agent commit
+[--execute]` (requires phase `APPROVED` + approvalStatus `APPROVED`; stages and commits with a
+deterministic, non-overridable message -- `CookVideoAgent: <taskId>` / the task's objective as
+body -- then persists `APPROVED → COMMITTING`, or `→ FAILED` on any doubt) and `cookvideo-agent
+push [--execute]` (requires phase `COMMITTING`; runs a plain `git push`, never chained from
+`commit`; a successful push stays at `COMMITTING` since it is not a deploy, a failed push moves
+to `FAILED` while preserving the already-recorded local commit hash). Both are gated by their
+own double gate (`--execute` AND a new `COOKVIDEO_AGENT_GIT_WRITE_MODE=local`, mirroring
+`COOKVIDEO_AGENT_EXECUTION_MODE`'s exact fail-safe-to-dry-run parsing) and are hardcoded to the
+`CookVideo` execution target only -- neither command accepts a `--target` flag, so
+CookVideoAgent's own repository can never become a real git-write target through this feature.
+A real commit refuses (staging nothing) unless the CookVideo working tree's changes are
+entirely within the task's `filesExpectedToChange` (`validateGitWriteScope`, reusing
+`execute`'s existing "verify against ground truth" philosophy), and a real push refuses if
+there's no upstream configured or nothing to push, and is never force-resolved on a rejected/
+diverged push. Added `src/lib/gitWrite.ts`, `src/commands/commit.ts`, `src/commands/push.ts`,
+`applyCommitOutcome`/`applyPushOutcome` in `src/lib/taskState.ts` (reusing the existing
+`TRANSITIONS` table -- no new lifecycle phase or transition), `.cookvideo/GIT_WRITE_POLICY.md`,
+and `.cookvideo/GIT_WRITE_LOG.json` (append-only, mirroring `EXECUTION_LOG.json`'s exact
+pattern). Deployment (Vercel/Supabase/Mux) remains completely out of scope -- neither command
+can move a task to `DEPLOYING` or beyond. See `.cookvideo/DECISIONS.md` for the full rationale
+and the judgment calls it records.
+
+**Milestone 11:** preserve completed/abandoned task history. Previously, `reset`
 (`src/commands/reset.ts`) unconditionally overwrote `TASK_STATE.json` with an empty state,
 and `plan --replace` (`src/lib/plan.ts`) overwrote it with the new task -- both silently
 discarding the outgoing task's full structured record forever, with nothing surviving except

@@ -9,6 +9,8 @@ import { ADVANCE_TARGET_PHASES_HELP, parseAdvanceCliArgs, runAdvance } from "./c
 import { runReset } from "./commands/reset.js";
 import { formatExecuteReport, runExecuteCommand } from "./commands/execute.js";
 import { formatPlanReport, runPlanCommand } from "./commands/plan.js";
+import { formatCommitReport, runCommitCommand } from "./commands/commit.js";
+import { formatPushReport, runPushCommand } from "./commands/push.js";
 
 const USAGE = `cookvideo-agent — CookVideo local control-plane CLI
 
@@ -53,6 +55,20 @@ Usage:
                             COMMITTING/DEPLOYING/VERIFYING. A --replace archives the
                             outgoing task to .cookvideo/TASK_HISTORY.json first. Never edits
                             CookVideo, invokes Claude, or runs git commit/push.
+  cookvideo-agent commit [--execute]
+                            Requires phase APPROVED and approvalStatus APPROVED. Prepares (and,
+                            only in local git-write mode with --execute, runs) a real
+                            \`git add\`/\`git commit\` against the CookVideo repository only, using
+                            a deterministic, non-overridable commit message. Defaults to
+                            SAFE/DRY-RUN. Never pushes -- see \`push\` below. See
+                            .cookvideo/GIT_WRITE_POLICY.md.
+  cookvideo-agent push [--execute]
+                            Requires phase COMMITTING. Prepares (and, only in local git-write
+                            mode with --execute, runs) a real \`git push\` of the current branch
+                            against the CookVideo repository only. Never chained from \`commit\`
+                            -- always its own separate, explicit action. A rejected/diverged
+                            push fails visibly and is never force-resolved. Never deploys
+                            anything. See .cookvideo/GIT_WRITE_POLICY.md.
   cookvideo-agent help      Show this message
 `;
 
@@ -133,6 +149,18 @@ async function main(argv: string[]): Promise<number> {
 
       const result = runPlanCommand({ filePath, replace });
       console.log(formatPlanReport(result));
+      return result.ok ? 0 : 1;
+    }
+    case "commit": {
+      const executeFlag = argv.slice(3).includes("--execute");
+      const result = runCommitCommand(executeFlag);
+      console.log(formatCommitReport(result));
+      return result.ok ? 0 : 1;
+    }
+    case "push": {
+      const executeFlag = argv.slice(3).includes("--execute");
+      const result = runPushCommand(executeFlag);
+      console.log(formatPushReport(result));
       return result.ok ? 0 : 1;
     }
     case "help":

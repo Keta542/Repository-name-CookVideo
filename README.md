@@ -45,9 +45,12 @@ Two more pieces the control plane is built around:
 
 - Not part of the CookVideo Next.js application.
 - Not a place that holds production credentials of any kind.
-- Not (yet) able to write to the CookVideo repository, or to Supabase, Vercel, or Mux.
-- Not (yet) able to commit, push, or deploy anything, even with approval recorded — the
-  approval gate exists now; the actions it will eventually unlock do not yet.
+- Not (yet) able to write to the CookVideo repository's source files, or to Supabase,
+  Vercel, or Mux.
+- Not (yet) able to deploy anything, even with approval recorded. Real `git commit`/`git
+  push` against the CookVideo repository *is* built (Milestone 12, `cookvideo-agent
+  commit`/`cookvideo-agent push`) but stays behind its own double gate and only ever
+  targets `APPROVED` tasks — see "Git commit/push" below.
 - Not, even with the Claude execution adapter (Milestone 3) added, able to invoke Claude for
   real by default — `execute` runs in SAFE/DRY-RUN mode unless both an explicit flag and an
   explicit environment variable are set (see "Claude execution adapter" below).
@@ -85,6 +88,8 @@ npm run advance -- --to <phase> [--note <text>]   # Record a single real-world l
 npm run reset     # Reset task state to empty (does not delete source or repo files)
 npm run execute   # Prepare (SAFE/DRY-RUN by default) a Claude implementation attempt
 npm run plan -- --file <path> [--replace]   # Submit a planner's JSON task definition
+npm run commit -- [--execute]   # Requires phase APPROVED; real git commit is SAFE/DRY-RUN by default
+npm run push -- [--execute]     # Requires phase COMMITTING; real git push is SAFE/DRY-RUN by default
 ```
 
 Equivalently, once built, invoke the local CLI entry point directly:
@@ -99,6 +104,8 @@ node dist/cli.js advance --to <phase> [--note <text>]
 node dist/cli.js reset
 node dist/cli.js execute [--execute]
 node dist/cli.js plan --file <path> [--replace]
+node dist/cli.js commit [--execute]
+node dist/cli.js push [--execute]
 node dist/cli.js help
 ```
 
@@ -190,6 +197,34 @@ model — in short: **defaults to SAFE/DRY-RUN**, prints everything about the pr
 execution, and never invokes an external process unless both `--execute` is passed on the
 command line *and* `COOKVIDEO_AGENT_EXECUTION_MODE=local` is set in the environment.
 
+### `commit`
+
+Requires the active task to be exactly `phase: APPROVED` and `approvalStatus: APPROVED`;
+refuses otherwise. Prepares (and, only when explicitly allowed, runs) a real `git add`/`git
+commit` against the CookVideo repository — never this repository, and never
+CLI-selectable to another target. Defaults to **SAFE/DRY-RUN**: previews the exact
+deterministic commit message (`CookVideoAgent: <taskId>` subject, the task's `objective` as
+body — never a free-form override) and the files that would be staged, without touching the
+repository. Real execution requires both `--execute` on the command line *and*
+`COOKVIDEO_AGENT_GIT_WRITE_MODE=local` in the environment. Refuses (moving the task to
+`FAILED`) on a detached HEAD, a change outside the task's `filesExpectedToChange` ("scope
+mismatch"), or nothing to commit. On success, reads the new commit hash back from git itself
+and persists `APPROVED → COMMITTING`. Never pushes. See "Git commit/push" below and
+`.cookvideo/GIT_WRITE_POLICY.md`.
+
+### `push`
+
+Requires the active task to be exactly `phase: COMMITTING`; refuses otherwise. Prepares
+(and, only when explicitly allowed, runs) a plain `git push` of the current branch against
+the CookVideo repository. Defaults to **SAFE/DRY-RUN**; real execution requires the same
+double gate as `commit` (`--execute` *and* `COOKVIDEO_AGENT_GIT_WRITE_MODE=local`). Refuses
+if there's no upstream configured or nothing to push. A rejected/non-fast-forward push
+surfaces git's own error verbatim and is never force-resolved, retried, or silently
+swallowed. **Never chained from `commit`** — always its own separate, explicit action. A
+successful push leaves the phase at `COMMITTING` (it is not a deploy); a failed push moves
+the task to `FAILED`, preserving the already-recorded local commit hash. See "Git
+commit/push" below and `.cookvideo/GIT_WRITE_POLICY.md`.
+
 ## Development
 
 ```sh
@@ -205,9 +240,11 @@ engine (`src/__tests__/taskState.test.ts`), the Claude adapter and execution eng
 contract and planning engine (`src/__tests__/taskInput.test.ts`), the `approve`/
 `advance`/`complete`/`reset` commands (`src/__tests__/approve.test.ts`,
 `src/__tests__/advance.test.ts`, `src/__tests__/complete.test.ts`,
-`src/__tests__/reset.test.ts`), and the task history archive
-(`src/__tests__/taskHistory.test.ts`) — all of which use temporary files and never touch the
-real `.cookvideo/TASK_STATE.json`. `npm run verify`
+`src/__tests__/reset.test.ts`), the task history archive
+(`src/__tests__/taskHistory.test.ts`), and the real git commit/push module
+(`src/__tests__/gitWrite.test.ts`, which runs real `git` against throwaway temp
+repositories, never the real CookVideo repository or this one) — all of which use
+temporary files and never touch the real `.cookvideo/TASK_STATE.json`. `npm run verify`
 chains `typecheck` + `lint` + `test` in one command — see "Verification claims" in
 `.cookvideo/ARCHITECTURE.md` for the rule around what a milestone may claim it covers.
 
@@ -225,9 +262,11 @@ it) read and update over time:
 | `BUILD_LOG.md` | Chronological record of what was built/changed here |
 | `APPROVAL_POLICY.md` | What CookVideo Agent may do automatically vs. what requires human approval |
 | `EXECUTION_POLICY.md` | What the Claude execution adapter may do in DRY-RUN vs. LOCAL mode |
+| `GIT_WRITE_POLICY.md` | What `commit`/`push` may do in DRY-RUN vs. LOCAL mode |
 | `TASK_STATE.json` | Machine-readable current task state — the source `task`/`approve`/`reset` operate on |
 | `EXECUTION_LOG.json` | Append-only record of every `execute` attempt (dry-run or real), one entry per run |
 | `TASK_HISTORY.json` | Append-only archive of every task that has left the active slot, via `reset` or `plan --replace` |
+| `GIT_WRITE_LOG.json` | Append-only record of every `commit`/`push` attempt (dry-run or real), one entry per run |
 
 ## Task lifecycle and approval gates
 
@@ -259,11 +298,13 @@ The lifecycle exists to enforce `.cookvideo/APPROVAL_POLICY.md`'s three categori
   operations, deleting large groups of project files, changing production secrets. Same
   gate, no exceptions, ever.
 
-`approve` only flips `APPROVAL_REQUIRED` → `APPROVED`. It does not commit, push, deploy, or
-perform the approved action — that's deliberate, establishing the safety/approval model
-itself before this control plane is given the ability to perform any consequential action.
-Wiring `APPROVED` tasks up to actually *doing* the commit/push/deploy step remains future
-work, not yet built.
+`approve` only flips `APPROVAL_REQUIRED` → `APPROVED`. It does not itself commit, push,
+deploy, or perform the approved action — that separation is deliberate, establishing the
+safety/approval model itself before this control plane was given the ability to perform any
+consequential action. Real `git commit`/`git push` for an `APPROVED` task is now built
+(Milestone 12) as two separate commands, `cookvideo-agent commit`/`cookvideo-agent push` —
+see "Git commit/push" below. Wiring a task up to an actual production deployment remains
+future work, not yet built.
 
 `cookvideo-agent advance` (Milestone 10) lets a human record each remaining step
 individually as it actually happens — `TESTING`→`REVIEW`→`APPROVAL_REQUIRED`, then, once
@@ -274,6 +315,51 @@ above is about: `advance` gives each of those its own dated `.cookvideo/BUILD_LO
 (optionally carrying a `--note`, e.g. a commit hash), without granting this control plane any
 new ability to actually perform them. `complete` is unchanged and still works as a one-call
 shortcut for anyone who doesn't need the granular trail.
+
+## Git commit/push
+
+Milestone 12 adds the last mile between an `APPROVED` task and a real change landing in the
+CookVideo repository: `src/lib/gitWrite.ts`, and the `cookvideo-agent commit`/`cookvideo-agent
+push` commands built on it. This is the only module in this control plane that ever runs a
+real `git add`/`git commit`/`git push`.
+
+- **Two separate commands, never chained.** `commit` may create a real local commit; it never
+  pushes. `push` may push an already-committed change; it is never invoked automatically by
+  `commit`, and cannot invoke `commit`. There is no flag or environment variable that makes
+  one perform the other's action.
+- **Eligible target: CookVideo only, not CLI-selectable.** Unlike `execute --target`, neither
+  command accepts a `--target` flag — both are hardcoded to the `CookVideo` execution target,
+  so there is no input by which a real git write can ever be pointed at CookVideoAgent's own
+  repository.
+- **A second, separate double gate.** `COOKVIDEO_AGENT_GIT_WRITE_MODE` (`dry-run` or `local`;
+  defaults to `dry-run` if unset or set to anything else, exactly like
+  `COOKVIDEO_AGENT_EXECUTION_MODE`) plus the `--execute` CLI flag — both required, or the
+  command stays dry-run. This is deliberately independent of `COOKVIDEO_AGENT_EXECUTION_MODE`:
+  enabling real Claude execution and enabling real git writes are two separate decisions an
+  operator must each make.
+- **Phase-gated on top of the double gate.** `commit` additionally requires `phase: APPROVED`
+  and `approvalStatus: APPROVED`. `push` additionally requires `phase: COMMITTING`.
+- **Deterministic commit message, not overridable.** Subject `CookVideoAgent: <taskId>`, body
+  the task's `objective` verbatim — no free-form message exists in this milestone.
+- **Scope-checked before staging anything.** `commit` reads the real CookVideo `git status
+  --porcelain` and refuses (staging nothing) if any changed path falls outside the task's
+  `filesExpectedToChange`, or if nothing has changed — never `git add -A`/`.`.
+- **Never force-resolves a push.** `push` reads git's own upstream-ahead count first, refuses
+  cleanly if there's no upstream or nothing to push, and surfaces a rejected/non-fast-forward
+  push's error verbatim rather than retrying or force-pushing.
+- **A successful push does not advance the phase to `DEPLOYING`.** `DEPLOYING` means a real
+  production deployment elsewhere in this project's vocabulary
+  (`.cookvideo/APPROVAL_POLICY.md` lists "Git push" and "Production Vercel deployment"
+  separately) — a git push alone must never be recorded as though it were one.
+  `advance --to DEPLOYING` remains exactly as manual/descriptive as it always has been.
+- **Every attempt is logged.** Dry-run or real, success or failure, each `commit`/`push`
+  attempt is appended to `.cookvideo/GIT_WRITE_LOG.json`, mirroring
+  `.cookvideo/EXECUTION_LOG.json`'s exact pattern.
+
+See `.cookvideo/GIT_WRITE_POLICY.md` for the full policy text and
+`.cookvideo/DECISIONS.md` for the design rationale, including the explicit choice that a
+failed push (after a successful commit) still moves the task to `FAILED` rather than staying
+at `COMMITTING` for a cheaper retry.
 
 ## Claude execution adapter
 
@@ -414,7 +500,22 @@ indistinguishable from an engineer acting on it.
 
 ## Current milestone
 
-**Milestone 11 (this one):** preserves completed/abandoned task history. Previously, `reset`
+**Milestone 12 (this one):** real `git commit`/`git push` for `APPROVED` tasks, as two
+separate commands. Previously, `.cookvideo/APPROVAL_POLICY.md` described commit/push as
+requiring approval but stated that performing the approved action was "future work, not yet
+built" — `approve`/`advance --to COMMITTING`/`complete --commit <hash>` only ever *recorded*
+that a commit happened, via free-text a human supplied. Added `cookvideo-agent commit
+[--execute]` (requires `phase: APPROVED` + `approvalStatus: APPROVED`; stages and commits with
+a deterministic, non-overridable message, then persists `APPROVED → COMMITTING`, or `→
+FAILED` on any doubt) and `cookvideo-agent push [--execute]` (requires `phase: COMMITTING`;
+runs a plain `git push`, never chained from `commit`; a successful push stays at `COMMITTING`
+since it is not a deploy, a failed push moves to `FAILED` while preserving the local commit
+hash). Both are gated by their own double gate (`--execute` AND
+`COOKVIDEO_AGENT_GIT_WRITE_MODE=local`) and hardcoded to the `CookVideo` execution target only
+— see "Git commit/push" above, `.cookvideo/GIT_WRITE_POLICY.md`, and
+`.cookvideo/DECISIONS.md` for the full design.
+
+**Milestone 11:** preserves completed/abandoned task history. Previously, `reset`
 unconditionally overwrote `.cookvideo/TASK_STATE.json` with an empty state, and `plan
 --replace` overwrote it with the new task — both silently discarding the outgoing task's
 full structured record forever, with nothing surviving except whatever `BUILD_LOG.md` prose

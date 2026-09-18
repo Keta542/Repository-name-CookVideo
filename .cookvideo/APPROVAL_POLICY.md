@@ -47,8 +47,15 @@ USER APPROVAL" or "ALWAYS REQUIRES USER APPROVAL" lists above. The
 `cookvideo-agent approve` command is the only way to move a task from
 `APPROVAL_REQUIRED` to `APPROVED` — and that is *all* it does. Approving a
 task does not commit, push, deploy, or perform the approved action; it only
-records that a human said yes. Performing the approved action itself is
-future work, not yet built.
+records that a human said yes.
+
+Performing the approved git commit/push is now built (Milestone 12):
+`cookvideo-agent commit`/`cookvideo-agent push`, gated by their own double
+gate (an explicit `--execute` flag and `COOKVIDEO_AGENT_GIT_WRITE_MODE=local`)
+**on top of** requiring the task to already be `APPROVED` here. See
+`.cookvideo/GIT_WRITE_POLICY.md` for the full detail. Production deployment
+(Vercel/Supabase/Mux) is still future work, not yet built — nothing added in
+Milestone 12 can move a task to `DEPLOYING` or beyond.
 
 ## Enforcement: which tasks the gate actually applies to (Milestone 7)
 

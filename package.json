@@ -21,6 +21,8 @@
     "reset": "npm run build --silent && node dist/cli.js reset",
     "execute": "npm run build --silent && node dist/cli.js execute",
     "plan": "npm run build --silent && node dist/cli.js plan",
+    "commit": "npm run build --silent && node dist/cli.js commit",
+    "push": "npm run build --silent && node dist/cli.js push",
     "verify": "npm run typecheck && npm run lint && npm test"
   },
   "engines": {

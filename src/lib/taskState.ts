@@ -404,6 +404,106 @@ export function applyExecutionOutcome(
 }
 
 // ---------------------------------------------------------------------------
+// commit / push (real git write outcomes -- Milestone 12)
+//
+// `cookvideo-agent commit`/`cookvideo-agent push` (src/lib/gitWrite.ts) call
+// these once a real git attempt's outcome is known, exactly mirroring
+// beginImplementing/applyExecutionOutcome's shape: no parallel state
+// machine, every move checked against the same TRANSITIONS table every
+// other lifecycle function in this file already reads.
+// ---------------------------------------------------------------------------
+
+// Called after a real `git commit` attempt (never during dry-run). A
+// verified commit moves APPROVED -> COMMITTING; anything that stops a real
+// commit from happening (scope mismatch, nothing to commit, detached HEAD,
+// or a git add/commit failure) moves the task to FAILED, recoverable back to
+// PLANNED/IMPLEMENTING via the existing RECOVERABLE_FROM_STUCK path -- the
+// same "any doubt about whether the real action happened -> FAILED"
+// philosophy applyExecutionOutcome already established for Claude
+// invocation.
+export function applyCommitOutcome(
+  state: TaskState,
+  succeeded: boolean,
+  resultMessage: string,
+): ExecutionTransitionResult {
+  const nextPhase: TaskPhase = succeeded ? "COMMITTING" : "FAILED";
+  if (!isValidTransition(state.phase, nextPhase)) {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId ?? "(unknown)"} is in phase ${state.phase}, which cannot move to ` +
+        `${nextPhase}. Commit outcome was not persisted.`,
+    };
+  }
+  const nextState: TaskState = {
+    ...state,
+    phase: nextPhase,
+    result: resultMessage,
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    ok: true,
+    state: nextState,
+    message: `Task ${state.taskId ?? "(unknown)"} moved ${state.phase} -> ${nextPhase}.`,
+  };
+}
+
+// Called after a real `git push` attempt (never during dry-run). Unlike
+// applyCommitOutcome, a successful push does NOT advance the task's phase:
+// COMMITTING already accurately means "committed locally," and DEPLOYING
+// already means a real production deploy elsewhere in this project's
+// vocabulary (.cookvideo/APPROVAL_POLICY.md lists "Git push" and "Production
+// Vercel deployment" as separate items) -- advancing to DEPLOYING on a mere
+// git push would falsely claim a production deploy happened. A successful
+// push only updates `result`/`updatedAt` to record the confirmed push. A
+// failed push (rejected, diverged, network/auth failure, or nothing to
+// push) moves the task to FAILED, exactly like a failed commit -- the local
+// commit itself (and its hash, already recorded in `result` by
+// applyCommitOutcome) is preserved either way, since only `phase` and
+// `result`/`updatedAt` change here.
+export function applyPushOutcome(
+  state: TaskState,
+  succeeded: boolean,
+  resultMessage: string,
+): ExecutionTransitionResult {
+  if (succeeded) {
+    const nextState: TaskState = {
+      ...state,
+      result: resultMessage,
+      updatedAt: new Date().toISOString(),
+    };
+    return {
+      ok: true,
+      state: nextState,
+      message: `Task ${state.taskId ?? "(unknown)"} pushed successfully; phase remains COMMITTING.`,
+    };
+  }
+
+  const nextPhase: TaskPhase = "FAILED";
+  if (!isValidTransition(state.phase, nextPhase)) {
+    return {
+      ok: false,
+      state,
+      message:
+        `Task ${state.taskId ?? "(unknown)"} is in phase ${state.phase}, which cannot move to ` +
+        "FAILED. Push outcome was not persisted.",
+    };
+  }
+  const nextState: TaskState = {
+    ...state,
+    phase: nextPhase,
+    result: resultMessage,
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    ok: true,
+    state: nextState,
+    message: `Task ${state.taskId ?? "(unknown)"} moved ${state.phase} -> FAILED.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // advance (granular single-hop phase tracking -- Milestone 10)
 //
 // Before this, `completeTask` was the only way past TESTING: it validates

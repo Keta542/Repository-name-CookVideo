@@ -5,6 +5,81 @@ top.
 
 ---
 
+## 2026-09-17 — Milestone 12: real git commit/push for `APPROVED` tasks
+
+- Closed the gap named and deliberately deferred at the end of Milestone 11's own
+  `.cookvideo/DECISIONS.md` entry: `.cookvideo/APPROVAL_POLICY.md` listed "Git commit" and
+  "Git push" as requiring human approval, and the task lifecycle already has phases named
+  exactly for them (`COMMITTING`, `DEPLOYING`), but nothing in this control plane had ever
+  run `git add`/`git commit`/`git push` for real -- `approve` only flipped `approvalStatus`,
+  and `advance --to COMMITTING`/`complete --commit <hash>` only recorded a human-supplied,
+  unverified string. `src/lib/git.ts` remained entirely read-only.
+- Added `src/lib/gitWrite.ts`: the only module in this control plane that ever runs a real
+  `git add`/`git commit`/`git push`. `runCommitWrite` requires the active task to be exactly
+  `phase: APPROVED` + `approvalStatus: APPROVED`, refuses in a detached HEAD state, validates
+  the real CookVideo working tree's changes (`git status --porcelain`, via
+  `validateGitWriteScope`) are entirely within the task's `filesExpectedToChange` before
+  staging anything (never `git add -A`/`.`), commits with a deterministic, non-overridable
+  message (`CookVideoAgent: <taskId>` subject, the task's `objective` as body), and reads the
+  resulting hash back via `git rev-parse HEAD` (never self-reported). `runPushWrite` requires
+  `phase: COMMITTING`, checks git's own upstream-ahead count before attempting anything, then
+  runs a plain `git push` (current branch only, no `-u`/`--force`/refspec) -- never invoked by
+  `commit`, and cannot invoke `commit`. Both are gated by a new double gate: an explicit
+  `--execute` flag *and* `COOKVIDEO_AGENT_GIT_WRITE_MODE=local` (`src/config.ts`,
+  `parseGitWriteMode`, mirroring `COOKVIDEO_AGENT_EXECUTION_MODE`'s exact
+  fail-safe-to-dry-run parsing), and hardcoded to the `CookVideo` execution target only --
+  neither command accepts a `--target` flag, so a real git write can never be pointed at
+  CookVideoAgent's own repository.
+- Added `applyCommitOutcome`/`applyPushOutcome` (`src/lib/taskState.ts`), mirroring
+  `applyExecutionOutcome`'s exact shape and reusing the existing `TRANSITIONS` table -- no new
+  lifecycle phase or transition. A verified commit moves `APPROVED` -> `COMMITTING`; any doubt
+  about whether a real commit happened moves the task to `FAILED` instead. A successful push
+  deliberately does **not** advance the phase to `DEPLOYING` (that already means a real
+  production deploy elsewhere in this project's vocabulary) -- it only updates
+  `result`/`updatedAt`; a failed push moves the task to `FAILED`, preserving the already-
+  recorded local commit hash.
+- Added `src/commands/commit.ts` (`runCommitCommand`, `formatCommitReport`) and
+  `src/commands/push.ts` (`runPushCommand`, `formatPushReport`), thin CLI wiring mirroring
+  `src/commands/execute.ts`'s split between wiring and orchestration, and wired both into
+  `src/cli.ts` (`cookvideo-agent commit [--execute]` / `cookvideo-agent push [--execute]`) and
+  new `commit`/`push` npm scripts (`package.json`).
+- Added `.cookvideo/GIT_WRITE_POLICY.md` (the full DRY-RUN/LOCAL policy text, companion to
+  `EXECUTION_POLICY.md` and `APPROVAL_POLICY.md`) and `.cookvideo/GIT_WRITE_LOG.json`, shipped
+  in its initial `[]` form, mirroring `EXECUTION_LOG.json`'s exact append-only pattern
+  (`GIT_WRITE_LOG_PATH` in `src/config.ts`, added to `STATE_FILES`).
+- Added `src/__tests__/gitWrite.test.ts` (real `git` against throwaway temp repositories
+  created fresh per test -- never the real CookVideo repository or this one -- covering commit
+  message determinism, scope validation, every pre-flight refusal, dry-run's read-only preview
+  behavior, a real successful commit and its persisted `APPROVED -> COMMITTING` transition, a
+  real successful push and its persisted "stays at COMMITTING" behavior, a real scope-mismatch
+  failure, a real detached-HEAD failure, a real "nothing to commit"/"nothing to push" failure,
+  a real rejected non-fast-forward push (via a second clone racing to push first), recovery
+  from `FAILED` back to a successful retry, the git write log's append behavior, and
+  `parseGitWriteMode`'s fail-safe parsing) and 8 new tests in `src/__tests__/taskState.test.ts`
+  for `applyCommitOutcome`/`applyPushOutcome`.
+- Updated `.cookvideo/APPROVAL_POLICY.md` (the "future work, not yet built" line for
+  commit/push now points at `GIT_WRITE_POLICY.md` and clarifies only production deployment
+  remains unbuilt), `.cookvideo/ARCHITECTURE.md` (pipeline diagram, state-files list, "Current
+  milestone" section), `README.md` ("What this is not", usage/npm scripts, new `commit`/`push`
+  command sections, a new "Git commit/push" section, the state-files table, the lifecycle/
+  approval-gates section, and "Current milestone"), and `.cookvideo/DECISIONS.md` (full
+  Problem/Options/Decision/Why/Known-limitations entry, including the two explicit design
+  forks: a failed push after a successful commit still moves the task to `FAILED` rather than
+  staying at `COMMITTING`, and a successful push never advances the phase to `DEPLOYING`).
+- Ran `npm run verify` (`tsc --noEmit` + `eslint` + the full test suite, 210/210 passing) and
+  a live dry-run smoke test of the built CLI's `commit`/`push` commands against the real,
+  unaffected `.cookvideo/TASK_STATE.json` (task `MILESTONE-6-SEARCH-EMPTY-STATE-001`, phase
+  `COMPLETED`) -- `commit` correctly refused ("requires phase APPROVED"; still previewed the
+  deterministic commit message) and `push` correctly refused ("requires phase COMMITTING"),
+  neither touching the real CookVideo repository or `TASK_STATE.json`.
+- `COOKVIDEO_AGENT_GIT_WRITE_MODE` was not set to `local` in any real environment as part of
+  this milestone -- real commit/push against the live CookVideo repository was verified via
+  temporary git repositories in the test suite, not via a real commit/push. Enabling `local`
+  mode for real remains a deliberate future decision. Did not commit, push, or otherwise touch
+  the real CookVideo repository, Supabase, Vercel, Mux, or GitHub.
+
+---
+
 ## 2026-09-13 — Milestone 11: preserve completed/abandoned task history (`TASK_HISTORY.json`)
 
 - Closed a gap identical in shape to the one `EXECUTION_LOG.json` already solved for execute

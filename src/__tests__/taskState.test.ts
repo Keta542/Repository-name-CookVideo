@@ -7,7 +7,9 @@ import {
   ADVANCEABLE_TARGET_PHASES,
   EMPTY_TASK_STATE,
   advanceTaskPhase,
+  applyCommitOutcome,
   applyExecutionOutcome,
+  applyPushOutcome,
   approveTask,
   beginImplementing,
   completeTask,
@@ -527,6 +529,57 @@ test("applyExecutionOutcome refuses a phase where the target transition isn't le
   // the escape hatches TESTING/FAILED would otherwise use.
   const task = activeTask({ phase: "COMPLETED" });
   const result = applyExecutionOutcome(task, true, "irrelevant");
+  assert.equal(result.ok, false);
+  assert.equal(result.state, task);
+});
+
+// ---------------------------------------------------------------------------
+// applyCommitOutcome / applyPushOutcome (Milestone 12)
+// ---------------------------------------------------------------------------
+
+test("applyCommitOutcome moves APPROVED to COMMITTING on success and records the result message", () => {
+  const task = activeTask({ phase: "APPROVED", approvalStatus: "APPROVED" });
+  const result = applyCommitOutcome(task, true, "Committed. CookVideo commit: abc123");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "COMMITTING");
+  assert.equal(result.state.result, "Committed. CookVideo commit: abc123");
+});
+
+test("applyCommitOutcome moves APPROVED to FAILED on failure and records the result message", () => {
+  const task = activeTask({ phase: "APPROVED", approvalStatus: "APPROVED" });
+  const result = applyCommitOutcome(task, false, "NOTHING TO COMMIT: no changes found in the CookVideo repository.");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "FAILED");
+  assert.match(result.state.result ?? "", /NOTHING TO COMMIT/);
+});
+
+test("applyCommitOutcome refuses a phase where the target transition isn't legal", () => {
+  const task = activeTask({ phase: "COMPLETED" });
+  const result = applyCommitOutcome(task, true, "irrelevant");
+  assert.equal(result.ok, false);
+  assert.equal(result.state, task);
+});
+
+test("applyPushOutcome on success leaves the phase at COMMITTING and only updates result/updatedAt", () => {
+  const task = activeTask({ phase: "COMMITTING", result: "Committed. CookVideo commit: abc123" });
+  const result = applyPushOutcome(task, true, "Pushed. CookVideo commit: abc123");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "COMMITTING", "a successful push must never advance to DEPLOYING");
+  assert.equal(result.state.result, "Pushed. CookVideo commit: abc123");
+});
+
+test("applyPushOutcome on failure moves COMMITTING to FAILED and preserves the failure detail in result", () => {
+  const task = activeTask({ phase: "COMMITTING", result: "Committed. CookVideo commit: abc123" });
+  const result = applyPushOutcome(task, false, "git push failed (local commit abc123 was not pushed): rejected");
+  assert.equal(result.ok, true);
+  assert.equal(result.state.phase, "FAILED");
+  assert.match(result.state.result ?? "", /abc123/);
+  assert.match(result.state.result ?? "", /rejected/);
+});
+
+test("applyPushOutcome refuses a phase where FAILED isn't a legal transition", () => {
+  const task = activeTask({ phase: "COMPLETED" });
+  const result = applyPushOutcome(task, false, "irrelevant");
   assert.equal(result.ok, false);
   assert.equal(result.state, task);
 });
